@@ -1,0 +1,523 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Copa Energía Asignada — Torneo Pokémon TCG Pocket</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Rajdhani:wght@600;700&family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --bg: #12141A;
+    --panel: #1B1E27;
+    --panel-alt: #20242F;
+    --line: #2B2F3B;
+    --text: #E7E9EE;
+    --muted: #8D93A3;
+    --accent: #F2B441;
+    --blue: #4F9FE0;
+    --danger: #D9736E;
+    --danger-dark: #4A2220;
+    --success: #6FBB6C;
+    --success-bg: #DCEFDB;
+    --success-text: #123B22;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text); font-family: 'Inter', sans-serif; }
+  h1, h2, .display { font-family: 'Rajdhani', sans-serif; font-weight: 700; }
+  button { font-family: 'Inter', sans-serif; cursor: pointer; }
+  input, textarea { font-family: 'Inter', sans-serif; }
+  .btn { font-weight: 500; font-size: 13.5px; padding: 9px 16px; border-radius: 6px; border: 1px solid transparent; transition: filter .12s ease; }
+  .btn:hover { filter: brightness(1.12); }
+  .btn:disabled { opacity: .45; cursor: not-allowed; }
+  .btn-sm { font-size: 12.5px; padding: 5px 10px; }
+  .btn-primary { background: var(--accent); color: #241B04; border-color: var(--accent); }
+  .btn-secondary { background: transparent; color: var(--text); border-color: var(--line); }
+  .btn-ghost { background: var(--panel-alt); color: var(--text); border-color: var(--line); }
+  .btn-danger { background: transparent; color: var(--danger); border-color: var(--danger-dark); }
+  .card { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 18px; }
+  .badge { display: inline-flex; align-items: center; gap: 6px; font-size: 12.5px; font-weight: 600; padding: 4px 10px; border-radius: 20px; background: var(--panel-alt); border: 1px solid var(--line); }
+  .energy-badge { display: inline-flex; align-items: center; gap: 7px; font-size: 13px; font-weight: 600; padding: 6px 13px; border-radius: 20px; color: #0B0C0F; }
+  .energy-dot { width: 7px; height: 7px; border-radius: 50%; background: #0B0C0F; opacity: .55; }
+  input[type=text], textarea {
+    width: 100%; background: var(--panel-alt); border: 1px solid var(--line); border-radius: 6px;
+    padding: 10px 12px; color: var(--text); font-size: 14px;
+  }
+  table { width: 100%; border-collapse: collapse; }
+  th { text-align: left; font-size: 12px; color: var(--muted); font-weight: 600; padding: 8px 10px; border-bottom: 1px solid var(--line); }
+  td { padding: 8px 10px; font-size: 13.5px; border-bottom: none; }
+  .tab-btn { padding: 12px 16px; background: transparent; border: none; font-size: 13.5px; font-weight: 600; color: var(--muted); border-bottom: 2px solid transparent; white-space: nowrap; }
+  .tab-btn.active { color: var(--accent); border-bottom-color: var(--accent); }
+  .bar-row { display: grid; grid-template-columns: 140px 1fr 34px; align-items: center; gap: 10px; margin-bottom: 6px; }
+  .bar-track { background: var(--panel-alt); border-radius: 4px; height: 18px; overflow: hidden; }
+  .bar-fill { height: 100%; border-radius: 4px; }
+  ::placeholder { color: var(--muted); opacity: .7; }
+</style>
+</head>
+<body>
+<div id="app"></div>
+
+<script>
+/* ---------- constants ---------- */
+var STORAGE_KEY = 'tcgPocketTournamentV1';
+var ENERGY_TYPES = [
+  { name: 'Fuego', color: '#E8683D' },
+  { name: 'Agua', color: '#4F9FE0' },
+  { name: 'Planta', color: '#5FAE5C' },
+  { name: 'Rayo', color: '#F2C230' },
+  { name: 'Psíquico', color: '#B07CC6' },
+  { name: 'Lucha', color: '#C1584A' },
+  { name: 'Oscuridad', color: '#8B85A0' },
+  { name: 'Metal', color: '#9BA6B0' }
+];
+
+/* ---------- ephemeral UI state (not persisted) ---------- */
+var ui = { tab: 'ronda', viewRoundIdx: null, confirmReset: false, formError: '' };
+
+/* ---------- persistence ---------- */
+function loadState() {
+  try {
+    var raw = localStorage.getItem(STORAGE_KEY);
+    return raw ? JSON.parse(raw) : null;
+  } catch (e) { return null; }
+}
+function saveState(state) {
+  try {
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
+    return true;
+  } catch (e) { return false; }
+}
+var state = loadState();
+
+/* ---------- helpers ---------- */
+function uid() { return Math.random().toString(36).slice(2, 9) + Date.now().toString(36).slice(-4); }
+function pairKey(a, b) { return [a, b].sort().join('::'); }
+function esc(s) { return String(s).replace(/[&<>"']/g, function (c) { return ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]; }); }
+function playerName(st, id) { var p = st.players.find(function (pl) { return pl.id === id; }); return p ? p.name : '—'; }
+
+function computeStandings(st) {
+  var standings = {};
+  st.players.forEach(function (p) { standings[p.id] = { id: p.id, name: p.name, points: 0, wins: 0, losses: 0, gamesWon: 0, gamesLost: 0, byes: 0 }; });
+  st.rounds.forEach(function (round) {
+    round.matches.forEach(function (m) {
+      if (m.bye) { var s = standings[m.p1]; if (s) { s.points += 1; s.wins += 1; s.byes += 1; } return; }
+      if (m.status !== 'done') return;
+      var s1 = standings[m.p1], s2 = standings[m.p2];
+      if (!s1 || !s2) return;
+      s1.gamesWon += m.p1g; s1.gamesLost += m.p2g;
+      s2.gamesWon += m.p2g; s2.gamesLost += m.p1g;
+      if (m.winner === m.p1) { s1.points += 1; s1.wins += 1; s2.losses += 1; }
+      else if (m.winner === m.p2) { s2.points += 1; s2.wins += 1; s1.losses += 1; }
+    });
+  });
+  return standings;
+}
+
+function generatePairings(st) {
+  var standings = computeStandings(st);
+  var played = new Set();
+  st.rounds.forEach(function (r) { r.matches.forEach(function (m) { if (!m.bye) played.add(pairKey(m.p1, m.p2)); }); });
+  var sorted = st.players.map(function (p) { return p.id; }).sort(function (a, b) {
+    var sa = standings[a], sb = standings[b];
+    if (sb.points !== sa.points) return sb.points - sa.points;
+    var da = sa.gamesWon - sa.gamesLost, db = sb.gamesWon - sb.gamesLost;
+    if (db !== da) return db - da;
+    return 0;
+  });
+  var unpaired = sorted.slice();
+  var byeId = null;
+  if (unpaired.length % 2 === 1) {
+    for (var i = unpaired.length - 1; i >= 0; i--) {
+      if (standings[unpaired[i]].byes === 0) { byeId = unpaired[i]; unpaired.splice(i, 1); break; }
+    }
+    if (byeId === null) byeId = unpaired.pop();
+  }
+  var pairs = [];
+  while (unpaired.length) {
+    var p1 = unpaired.shift();
+    var idx = unpaired.findIndex(function (p2) { return !played.has(pairKey(p1, p2)); });
+    if (idx === -1) idx = 0;
+    var p2 = unpaired.splice(idx, 1)[0];
+    pairs.push([p1, p2]);
+  }
+  return { pairs: pairs, byeId: byeId };
+}
+
+/* ---------- state mutators ---------- */
+function updateState(mutator) {
+  state = mutator(state);
+  var ok = saveState(state);
+  if (!ok) { ui.formError = 'save'; }
+  render();
+}
+function updateMatch(matchId, updater) {
+  updateState(function (st) {
+    return Object.assign({}, st, {
+      rounds: st.rounds.map(function (r) {
+        return Object.assign({}, r, { matches: r.matches.map(function (m) { return m.id === matchId ? updater(m) : m; }) });
+      })
+    });
+  });
+}
+function makeMatches(pairs, byeId) {
+  var matches = pairs.map(function (pr) { return { id: uid(), p1: pr[0], p2: pr[1], p1g: 0, p2g: 0, status: 'pending', winner: null, deck: null, bye: false }; });
+  if (byeId) matches.push({ id: uid(), p1: byeId, p2: null, p1g: 2, p2g: 0, status: 'done', winner: byeId, deck: null, bye: true });
+  return matches;
+}
+
+function createTournament() {
+  var name = document.getElementById('tournamentName').value.trim();
+  var namesText = document.getElementById('playerNames').value;
+  var names = namesText.split('\n').map(function (n) { return n.trim(); }).filter(Boolean);
+  var errEl = document.getElementById('setupError');
+  if (!name) { errEl.textContent = 'Ponle un nombre al torneo.'; return; }
+  if (names.length < 32) { errEl.textContent = 'Necesitas al menos 32 jugadores (llevas ' + names.length + ').'; return; }
+  if (names.length > 128) { errEl.textContent = 'El máximo es 128 jugadores (llevas ' + names.length + ').'; return; }
+  var players = names.map(function (n) { return { id: uid(), name: n }; });
+  updateState(function () { return { name: name, players: players, rounds: [], createdAt: Date.now() }; });
+}
+
+function generateRound() {
+  var num = state.rounds.length + 1;
+  var pr = generatePairings(state);
+  var energyType = ENERGY_TYPES[(num - 1) % ENERGY_TYPES.length].name;
+  var matches = makeMatches(pr.pairs, pr.byeId);
+  updateState(function (st) { return Object.assign({}, st, { rounds: st.rounds.concat([{ number: num, energyType: energyType, matches: matches }]) }); });
+  ui.viewRoundIdx = null;
+}
+
+function incrementGame(matchId, side) {
+  updateMatch(matchId, function (m) {
+    if (m.status === 'done') return m;
+    var p1g = m.p1g, p2g = m.p2g;
+    if (side === 'p1') p1g++; else p2g++;
+    var status = 'progress', winner = null;
+    if (p1g >= 2) { status = 'done'; winner = m.p1; }
+    else if (p2g >= 2) { status = 'done'; winner = m.p2; }
+    return Object.assign({}, m, { p1g: p1g, p2g: p2g, status: status, winner: winner });
+  });
+}
+function decrementGame(matchId, side) {
+  updateMatch(matchId, function (m) {
+    if (m.status === 'done') return m;
+    var p1g = m.p1g, p2g = m.p2g;
+    if (side === 'p1' && p1g > 0) p1g--;
+    if (side === 'p2' && p2g > 0) p2g--;
+    return Object.assign({}, m, { p1g: p1g, p2g: p2g });
+  });
+}
+function resetMatch(matchId) {
+  updateMatch(matchId, function (m) { return Object.assign({}, m, { p1g: 0, p2g: 0, status: 'pending', winner: null, deck: null }); });
+}
+function submitDeck(matchId) {
+  var nameEl = document.getElementById('deck-name-' + matchId);
+  var pokEl = document.getElementById('deck-pok-' + matchId);
+  var errEl = document.getElementById('deck-err-' + matchId);
+  var name = nameEl.value.trim();
+  var pokemons = pokEl.value.split(',').map(function (s) { return s.trim(); }).filter(Boolean);
+  if (!name || pokemons.length === 0) { if (errEl) errEl.textContent = 'Completa el nombre del mazo y al menos un Pokémon.'; return; }
+  updateMatch(matchId, function (m) { return Object.assign({}, m, { deck: { name: name, pokemons: pokemons } }); });
+}
+
+function setTab(t) { ui.tab = t; ui.viewRoundIdx = null; render(); }
+function prevRound() { var idx = ui.viewRoundIdx === null ? state.rounds.length - 1 : ui.viewRoundIdx; ui.viewRoundIdx = Math.max(0, idx - 1); render(); }
+function nextRound() { var idx = ui.viewRoundIdx === null ? state.rounds.length - 1 : ui.viewRoundIdx; ui.viewRoundIdx = Math.min(state.rounds.length - 1, idx + 1); render(); }
+
+function showConfirmReset() { ui.confirmReset = true; render(); }
+function cancelReset() { ui.confirmReset = false; render(); }
+function confirmResetYes() {
+  localStorage.removeItem(STORAGE_KEY);
+  state = null;
+  ui = { tab: 'ronda', viewRoundIdx: null, confirmReset: false, formError: '' };
+  render();
+}
+
+/* ---------- render: setup screen ---------- */
+function renderSetup() {
+  return (
+    '<div style="max-width:640px;margin:0 auto;padding:40px 20px;">' +
+      '<p style="font-size:12.5px;font-weight:600;color:var(--accent);letter-spacing:.5px;margin:0 0 6px;">NUEVO TORNEO</p>' +
+      '<h1 style="font-size:34px;margin:0 0 24px;">Configura tu bracket suizo</h1>' +
+      '<div class="card">' +
+        '<label style="display:block;font-size:12.5px;color:var(--muted);margin-bottom:6px;">Nombre del torneo</label>' +
+        '<input type="text" id="tournamentName" value="Copa Energía Asignada" style="margin-bottom:18px;" />' +
+        '<label style="display:block;font-size:12.5px;color:var(--muted);margin-bottom:6px;">Jugadores — uno por línea (mínimo 32, máximo 128)</label>' +
+        '<textarea id="playerNames" rows="10" placeholder="Ash Ketchum\nMisty Waterflower\nBrock Harrison\n..." style="resize:vertical;"></textarea>' +
+        '<p id="setupError" style="color:var(--danger);font-size:12.5px;margin:10px 0 0;"></p>' +
+        '<div style="margin-top:16px;"><button class="btn btn-primary" onclick="createTournament()">Iniciar torneo</button></div>' +
+      '</div>' +
+    '</div>'
+  );
+}
+
+/* ---------- render: match card ---------- */
+function renderMatchCard(st, m) {
+  if (m.bye) {
+    var p1 = esc(playerName(st, m.p1));
+    return (
+      '<div class="card" style="padding:16px;">' +
+        '<div style="display:flex;justify-content:space-between;align-items:center;">' +
+          '<div><p class="display" style="font-size:18px;margin:0;">' + p1 + '</p>' +
+          '<p style="margin:2px 0 0;font-size:12.5px;color:var(--muted);">Descanso de la ronda — victoria automática</p></div>' +
+          '<span class="badge" style="background:var(--success-bg);color:var(--success-text);border:none;">BYE</span>' +
+        '</div>' +
+      '</div>'
+    );
+  }
+  var p1n = esc(playerName(st, m.p1)), p2n = esc(playerName(st, m.p2));
+  var done = m.status === 'done';
+  var winnerName = done ? playerName(st, m.winner) : null;
+  var c1 = winnerName === playerName(st, m.p1) ? 'var(--success)' : 'var(--text)';
+  var c2 = winnerName === playerName(st, m.p2) ? 'var(--success)' : 'var(--text)';
+  var html = '<div class="card" style="padding:16px;">';
+  html += '<div style="display:grid;grid-template-columns:1fr auto 1fr;align-items:center;gap:10px;">';
+  html += '<p class="display" style="font-size:18px;margin:0;text-align:right;color:' + c1 + ';">' + p1n + '</p>';
+  html += '<div style="display:flex;align-items:center;gap:8px;">' +
+            '<span class="display" style="font-size:26px;color:var(--accent);min-width:24px;text-align:center;">' + m.p1g + '</span>' +
+            '<span style="color:var(--muted);">–</span>' +
+            '<span class="display" style="font-size:26px;color:var(--accent);min-width:24px;text-align:center;">' + m.p2g + '</span>' +
+          '</div>';
+  html += '<p class="display" style="font-size:18px;margin:0;text-align:left;color:' + c2 + ';">' + p2n + '</p>';
+  html += '</div>';
+
+  if (!done) {
+    html += '<div style="display:grid;grid-template-columns:1fr auto 1fr;align-items:center;gap:10px;margin-top:12px;">';
+    html += '<div style="display:flex;justify-content:flex-end;gap:6px;">' +
+              '<button class="btn btn-secondary btn-sm" ' + (m.p1g === 0 ? 'disabled' : '') + ' onclick="decrementGame(\'' + m.id + '\',\'p1\')">−</button>' +
+              '<button class="btn btn-ghost btn-sm" onclick="incrementGame(\'' + m.id + '\',\'p1\')">+1 partida</button>' +
+            '</div><div></div>' +
+            '<div style="display:flex;gap:6px;">' +
+              '<button class="btn btn-ghost btn-sm" onclick="incrementGame(\'' + m.id + '\',\'p2\')">+1 partida</button>' +
+              '<button class="btn btn-secondary btn-sm" ' + (m.p2g === 0 ? 'disabled' : '') + ' onclick="decrementGame(\'' + m.id + '\',\'p2\')">−</button>' +
+            '</div>';
+    html += '</div>';
+  }
+
+  if (done) {
+    html += '<div style="margin-top:12px;display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px;">' +
+              '<span class="badge" style="background:var(--success-bg);color:var(--success-text);border:none;">Ganó ' + esc(winnerName) + '</span>' +
+              '<button class="btn btn-danger btn-sm" onclick="resetMatch(\'' + m.id + '\')">Corregir resultado</button>' +
+            '</div>';
+    if (!m.deck) {
+      html += '<div style="margin-top:10px;padding:12px;background:var(--panel-alt);border-radius:8px;border:1px solid var(--line);">' +
+                '<p style="font-size:12.5px;color:var(--accent);font-weight:600;margin:0 0 8px;">Mazo ganador de ' + esc(winnerName) + '</p>' +
+                '<input type="text" id="deck-name-' + m.id + '" placeholder="Nombre del mazo (ej. Pikachu ex / Raichu)" style="margin-bottom:8px;" />' +
+                '<input type="text" id="deck-pok-' + m.id + '" placeholder="Pokémon usados, separados por coma" />' +
+                '<p id="deck-err-' + m.id + '" style="color:var(--danger);font-size:12px;margin:6px 0 0;"></p>' +
+                '<div style="margin-top:10px;"><button class="btn btn-primary btn-sm" onclick="submitDeck(\'' + m.id + '\')">Guardar mazo</button></div>' +
+              '</div>';
+    } else {
+      html += '<div style="margin-top:10px;padding:8px 12px;background:var(--panel-alt);border-radius:8px;border:1px solid var(--line);">' +
+                '<p style="margin:0;font-size:12.5px;color:var(--accent);font-weight:600;">' + esc(m.deck.name) + '</p>' +
+                '<p style="margin:3px 0 0;font-size:12px;color:var(--muted);">' + m.deck.pokemons.map(esc).join(' · ') + '</p>' +
+              '</div>';
+    }
+  }
+  html += '</div>';
+  return html;
+}
+
+/* ---------- render: round tab ---------- */
+function renderRoundTab() {
+  if (state.rounds.length === 0) {
+    return '<div class="card" style="text-align:center;padding:32px;">' +
+      '<p class="display" style="font-size:20px;margin:0 0 8px;">Listo para arrancar</p>' +
+      '<p style="color:var(--muted);font-size:13.5px;margin:0 0 18px;">Genera la ronda 1 para asignar la energía y los cruces iniciales.</p>' +
+      '<button class="btn btn-primary" onclick="generateRound()">Generar ronda 1</button>' +
+    '</div>';
+  }
+  var currentIdx = state.rounds.length - 1;
+  var idx = ui.viewRoundIdx === null ? currentIdx : ui.viewRoundIdx;
+  var round = state.rounds[idx];
+  var isCurrent = idx === currentIdx;
+  var currentComplete = state.rounds[currentIdx].matches.every(function (m) { return m.status === 'done'; });
+  var canGenerateNext = state.rounds.length < 8 && currentComplete;
+  var finished = state.rounds.length === 8 && currentComplete;
+  var energy = ENERGY_TYPES.find(function (e) { return e.name === round.energyType; }) || ENERGY_TYPES[0];
+
+  var html = '<div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:10px;margin-bottom:18px;">';
+  html += '<div style="display:flex;align-items:center;gap:10px;">' +
+            '<button class="btn btn-secondary btn-sm" ' + (idx <= 0 ? 'disabled' : '') + ' onclick="prevRound()">◀</button>' +
+            '<p class="display" style="font-size:20px;margin:0;">Ronda ' + round.number + ' de 8</p>' +
+            '<button class="btn btn-secondary btn-sm" ' + (idx >= currentIdx ? 'disabled' : '') + ' onclick="nextRound()">▶</button>' +
+          '</div>';
+  html += '<span class="energy-badge" style="background:' + energy.color + ';"><span class="energy-dot"></span>' + energy.name + '</span>';
+  html += '</div>';
+
+  html += '<div style="display:grid;gap:12px;">';
+  round.matches.forEach(function (m) { html += renderMatchCard(state, m); });
+  html += '</div>';
+
+  if (isCurrent) {
+    html += '<div style="margin-top:22px;display:flex;justify-content:center;">';
+    if (finished) {
+      html += '<span class="badge" style="background:var(--success-bg);color:var(--success-text);border:none;">Torneo completo — revisa la clasificación final</span>';
+    } else if (canGenerateNext) {
+      html += '<button class="btn btn-primary" onclick="generateRound()">Generar ronda ' + (state.rounds.length + 1) + '</button>';
+    } else {
+      html += '<p style="color:var(--muted);font-size:13px;">Completa todos los enfrentamientos de esta ronda para continuar.</p>';
+    }
+    html += '</div>';
+  }
+  return html;
+}
+
+/* ---------- render: standings tab ---------- */
+function renderStandingsTab() {
+  var standings = computeStandings(state);
+  var rows = state.players.map(function (p) { return standings[p.id]; }).sort(function (a, b) {
+    return (b.points - a.points) || ((b.gamesWon - b.gamesLost) - (a.gamesWon - a.gamesLost));
+  });
+  var html = '<div class="card"><h2 style="font-size:24px;margin:0 0 4px;">Clasificación general</h2>' +
+    '<p style="color:var(--muted);font-size:13.5px;margin:0 0 16px;">Puntos: 1 por enfrentamiento ganado (el bye cuenta como victoria).</p>' +
+    '<div style="overflow-x:auto;"><table><thead><tr>' +
+    '<th style="text-align:center;">#</th><th>Jugador</th><th style="text-align:center;">Pts</th><th style="text-align:center;">V-D</th><th style="text-align:center;">Juegos</th><th style="text-align:center;">Byes</th>' +
+    '</tr></thead><tbody>';
+  rows.forEach(function (r, i) {
+    html += '<tr style="background:' + (i % 2 === 0 ? 'transparent' : 'var(--panel-alt)') + ';">' +
+      '<td style="text-align:center;color:var(--muted);">' + (i + 1) + '</td>' +
+      '<td style="font-weight:500;">' + esc(r.name) + '</td>' +
+      '<td style="text-align:center;color:var(--accent);font-weight:700;">' + r.points + '</td>' +
+      '<td style="text-align:center;">' + r.wins + '-' + r.losses + '</td>' +
+      '<td style="text-align:center;color:var(--muted);">' + r.gamesWon + '-' + r.gamesLost + '</td>' +
+      '<td style="text-align:center;color:var(--muted);">' + r.byes + '</td>' +
+    '</tr>';
+  });
+  html += '</tbody></table></div></div>';
+  return html;
+}
+
+/* ---------- render: players tab ---------- */
+function renderPlayersTab() {
+  var html = '<div class="card"><h2 style="font-size:24px;margin:0 0 4px;">Jugadores</h2>' +
+    '<p style="color:var(--muted);font-size:13.5px;margin:0 0 16px;">' + state.players.length + ' jugadores inscritos</p>' +
+    '<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(180px,1fr));gap:8px;">';
+  state.players.forEach(function (p) {
+    html += '<div style="padding:8px 12px;background:var(--panel-alt);border:1px solid var(--line);border-radius:6px;font-size:13px;">' + esc(p.name) + '</div>';
+  });
+  html += '</div></div>';
+  return html;
+}
+
+/* ---------- render: analytics tab ---------- */
+function bars(data, color, maxLabelWidth) {
+  var max = Math.max.apply(null, data.map(function (d) { return d.count; }).concat([1]));
+  var html = '';
+  data.forEach(function (d) {
+    var pct = Math.round((d.count / max) * 100);
+    html += '<div class="bar-row">' +
+      '<span style="font-size:12.5px;color:var(--text);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">' + esc(d.name) + '</span>' +
+      '<div class="bar-track"><div class="bar-fill" style="width:' + pct + '%;background:' + color + ';"></div></div>' +
+      '<span style="font-size:12.5px;color:var(--muted);text-align:right;">' + d.count + '</span>' +
+    '</div>';
+  });
+  return html;
+}
+
+function renderAnalyticsTab() {
+  var pokemonCounts = {}, deckCounts = {};
+  state.rounds.forEach(function (r) {
+    r.matches.forEach(function (m) {
+      if (m.deck) {
+        var key = m.deck.name.trim();
+        deckCounts[key] = (deckCounts[key] || 0) + 1;
+        m.deck.pokemons.forEach(function (pk) {
+          var norm = pk.trim();
+          if (!norm) return;
+          pokemonCounts[norm] = (pokemonCounts[norm] || 0) + 1;
+        });
+      }
+    });
+  });
+  var totalDecks = Object.values(deckCounts).reduce(function (a, b) { return a + b; }, 0);
+  var header = '<h2 style="font-size:24px;margin:0 0 4px;">Analítica de mazos</h2>' +
+    '<p style="color:var(--muted);font-size:13.5px;margin:0 0 16px;">Basado en los mazos ganadores reportados en cada ronda — útil para tu tier list y deck list.</p>';
+
+  if (totalDecks === 0) {
+    return header + '<div class="card"><p style="color:var(--muted);font-size:14px;margin:0;">Todavía no hay mazos registrados. En cuanto se reporten victorias con su mazo, aquí verás el Pokémon y el arquetipo más usados del torneo.</p></div>';
+  }
+
+  var pokemonData = Object.entries(pokemonCounts).sort(function (a, b) { return b[1] - a[1]; }).slice(0, 12).map(function (e) { return { name: e[0], count: e[1] }; });
+  var deckData = Object.entries(deckCounts).sort(function (a, b) { return b[1] - a[1]; }).slice(0, 12).map(function (e) { return { name: e[0], count: e[1] }; });
+
+  var html = header + '<div style="display:grid;gap:20px;">';
+  html += '<div class="card"><p class="display" style="font-size:18px;margin:0 0 12px;">Pokémon más usados</p>' + bars(pokemonData, 'var(--accent)') + '</div>';
+  html += '<div class="card"><p class="display" style="font-size:18px;margin:0 0 12px;">Mazos (arquetipos) más usados</p>' + bars(deckData, 'var(--blue)') + '</div>';
+
+  html += '<div class="card"><p class="display" style="font-size:18px;margin:0 0 12px;">Tabla para tu tier list</p>' +
+    '<table><thead><tr><th>Mazo</th><th style="text-align:center;">Veces ganador</th><th style="text-align:center;">% del total</th></tr></thead><tbody>';
+  Object.entries(deckCounts).sort(function (a, b) { return b[1] - a[1]; }).forEach(function (e, i) {
+    html += '<tr style="background:' + (i % 2 === 0 ? 'transparent' : 'var(--panel-alt)') + ';">' +
+      '<td>' + esc(e[0]) + '</td>' +
+      '<td style="text-align:center;color:var(--accent);font-weight:600;">' + e[1] + '</td>' +
+      '<td style="text-align:center;color:var(--muted);">' + Math.round((e[1] / totalDecks) * 100) + '%</td>' +
+    '</tr>';
+  });
+  html += '</tbody></table></div>';
+  html += '</div>';
+  return html;
+}
+
+/* ---------- master render ---------- */
+function render() {
+  var root = document.getElementById('app');
+  if (!state) { root.innerHTML = renderSetup(); return; }
+
+  var currentIdx = state.rounds.length - 1;
+  var currentComplete = currentIdx >= 0 ? state.rounds[currentIdx].matches.every(function (m) { return m.status === 'done'; }) : true;
+  var finished = state.rounds.length === 8 && currentComplete;
+
+  var tabs = [
+    { id: 'ronda', label: 'Ronda actual' },
+    { id: 'clasificacion', label: 'Clasificación' },
+    { id: 'jugadores', label: 'Jugadores' },
+    { id: 'analitica', label: 'Analítica' }
+  ];
+
+  var html = '';
+  html += '<div style="display:flex;flex-wrap:wrap;gap:12px;justify-content:space-between;align-items:center;padding:18px 24px;border-bottom:1px solid var(--line);background:var(--panel);">';
+  html += '<div><p style="margin:0;font-size:11.5px;color:var(--muted);font-weight:600;letter-spacing:.4px;">TORNEO</p>' +
+            '<h1 style="margin:2px 0 0;font-size:22px;">' + esc(state.name) + '</h1></div>';
+  html += '<div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;">' +
+            '<span class="badge">' + state.players.length + ' jugadores</span>' +
+            '<span class="badge">Ronda ' + Math.max(state.rounds.length, 0) + '/8</span>' +
+            (finished ? '<span class="badge" style="background:var(--success-bg);color:var(--success-text);border:none;">Torneo finalizado</span>' : '') +
+          '</div></div>';
+
+  html += '<div style="display:flex;gap:4px;padding:0 24px;border-bottom:1px solid var(--line);background:var(--panel);overflow-x:auto;">';
+  tabs.forEach(function (t) {
+    html += '<button class="tab-btn ' + (ui.tab === t.id ? 'active' : '') + '" onclick="setTab(\'' + t.id + '\')">' + t.label + '</button>';
+  });
+  html += '</div>';
+
+  html += '<div style="padding:24px;max-width:900px;margin:0 auto;width:100%;">';
+  if (ui.formError === 'save') {
+    html += '<div style="margin-bottom:16px;padding:10px 14px;background:var(--danger-dark);border:1px solid var(--danger);border-radius:8px;color:#FBD7D5;font-size:13px;">No se pudo guardar el último cambio en este navegador. Revisa el espacio de almacenamiento disponible.</div>';
+  }
+
+  if (ui.tab === 'ronda') html += renderRoundTab();
+  else if (ui.tab === 'clasificacion') html += renderStandingsTab();
+  else if (ui.tab === 'jugadores') html += renderPlayersTab();
+  else if (ui.tab === 'analitica') html += renderAnalyticsTab();
+
+  html += '<div style="margin-top:32px;border-top:1px solid var(--line);padding-top:16px;display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:10px;">';
+  html += '<span style="font-size:12px;color:var(--muted);">Los datos se guardan en este navegador (almacenamiento local).</span>';
+  if (!ui.confirmReset) {
+    html += '<button class="btn btn-danger btn-sm" onclick="showConfirmReset()">Reiniciar torneo</button>';
+  } else {
+    html += '<div style="display:flex;gap:8px;align-items:center;">' +
+              '<span style="font-size:12.5px;color:var(--muted);">Esto borra todo lo registrado. ¿Seguro?</span>' +
+              '<button class="btn btn-secondary btn-sm" onclick="cancelReset()">Cancelar</button>' +
+              '<button class="btn btn-danger btn-sm" onclick="confirmResetYes()">Sí, reiniciar</button>' +
+            '</div>';
+  }
+  html += '</div>';
+  html += '</div>';
+
+  root.innerHTML = html;
+}
+
+render();
+</script>
+</body>
+</html>
