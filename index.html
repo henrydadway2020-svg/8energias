@@ -95,6 +95,27 @@ function pairKey(a, b) { return [a, b].sort().join('::'); }
 function esc(s) { return String(s).replace(/[&<>"']/g, function (c) { return ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]; }); }
 function playerName(st, id) { var p = st.players.find(function (pl) { return pl.id === id; }); return p ? p.name : '—'; }
 
+/* ---------- organizer lock ---------- */
+/* Los jugadores solo pueden registrar SU mazo de la ronda actual. Cualquier otra
+   acción (reportar resultados, generar rondas, corregir, reiniciar, editar un mazo
+   ya guardado) pide el PIN del organizador. El desbloqueo dura mientras la pestaña
+   del navegador siga abierta (sessionStorage) — al cerrarla, vuelve a bloquearse. */
+function lockFlagKey() { return 'organizerUnlocked_' + STORAGE_KEY; }
+function isUnlocked() { try { return sessionStorage.getItem(lockFlagKey()) === '1'; } catch (e) { return false; } }
+function lockOrganizer() { try { sessionStorage.removeItem(lockFlagKey()); } catch (e) {} render(); }
+function requireUnlock(action) {
+  if (isUnlocked()) { action(); return; }
+  var pin = window.prompt('PIN de organizador para confirmar esta acción:');
+  if (pin === null) return;
+  if (state && pin === state.pin) {
+    try { sessionStorage.setItem(lockFlagKey(), '1'); } catch (e) {}
+    action();
+  } else {
+    alert('PIN incorrecto.');
+  }
+}
+function unlockOrganizer() { requireUnlock(function () { render(); }); }
+
 function computeStandings(st) {
   var standings = {};
   st.players.forEach(function (p) { standings[p.id] = { id: p.id, name: p.name, points: 0, wins: 0, losses: 0, gamesWon: 0, gamesLost: 0, byes: 0 }; });
@@ -159,121 +180,157 @@ function updateMatch(matchId, updater) {
     });
   });
 }
+function updateRoundDeck(roundNumber, playerId, deck) {
+  updateState(function (st) {
+    return Object.assign({}, st, {
+      rounds: st.rounds.map(function (r) {
+        if (r.number !== roundNumber) return r;
+        var decks = Object.assign({}, r.decks || {});
+        if (deck === null) { delete decks[playerId]; } else { decks[playerId] = deck; }
+        return Object.assign({}, r, { decks: decks });
+      })
+    });
+  });
+}
 function makeMatches(pairs, byeId) {
-  var matches = pairs.map(function (pr) { return { id: uid(), p1: pr[0], p2: pr[1], p1g: 0, p2g: 0, status: 'pending', winner: null, deck: null, bye: false }; });
-  if (byeId) matches.push({ id: uid(), p1: byeId, p2: null, p1g: 2, p2g: 0, status: 'done', winner: byeId, deck: null, bye: true });
+  var matches = pairs.map(function (pr) { return { id: uid(), p1: pr[0], p2: pr[1], p1g: 0, p2g: 0, status: 'pending', winner: null, bye: false }; });
+  if (byeId) matches.push({ id: uid(), p1: byeId, p2: null, p1g: 2, p2g: 0, status: 'done', winner: byeId, bye: true });
   return matches;
 }
 
 function createTournament() {
   var name = document.getElementById('tournamentName').value.trim();
+  var pin = document.getElementById('organizerPin').value.trim();
   var namesText = document.getElementById('playerNames').value;
   var names = namesText.split('\n').map(function (n) { return n.trim(); }).filter(Boolean);
   var errEl = document.getElementById('setupError');
   if (!name) { errEl.textContent = 'Ponle un nombre al torneo.'; return; }
+  if (!pin || pin.length < 4) { errEl.textContent = 'Define un PIN de organizador de al menos 4 caracteres — lo pedirá la app para reportar resultados, generar rondas o corregir cosas.'; return; }
   if (names.length < 32) { errEl.textContent = 'Necesitas al menos 32 jugadores (llevas ' + names.length + ').'; return; }
   if (names.length > 128) { errEl.textContent = 'El máximo es 128 jugadores (llevas ' + names.length + ').'; return; }
   var players = names.map(function (n) { return { id: uid(), name: n }; });
-  updateState(function () { return { name: name, players: players, rounds: [], createdAt: Date.now() }; });
+  updateState(function () { return { name: name, pin: pin, players: players, rounds: [], createdAt: Date.now() }; });
 }
 
 function generateRound() {
-  var num = state.rounds.length + 1;
-  var pr = generatePairings(state);
-  var energyType = ENERGY_TYPES[(num - 1) % ENERGY_TYPES.length].name;
-  var matches = makeMatches(pr.pairs, pr.byeId);
-  updateState(function (st) { return Object.assign({}, st, { rounds: st.rounds.concat([{ number: num, energyType: energyType, matches: matches }]) }); });
-  ui.viewRoundIdx = null;
+  requireUnlock(function () {
+    var num = state.rounds.length + 1;
+    var pr = generatePairings(state);
+    var energyType = ENERGY_TYPES[(num - 1) % ENERGY_TYPES.length].name;
+    var matches = makeMatches(pr.pairs, pr.byeId);
+    updateState(function (st) { return Object.assign({}, st, { rounds: st.rounds.concat([{ number: num, energyType: energyType, matches: matches, decks: {} }]) }); });
+    ui.viewRoundIdx = null;
+  });
 }
 
 function incrementGame(matchId, side) {
-  updateMatch(matchId, function (m) {
-    if (m.status === 'done') return m;
-    var p1g = m.p1g, p2g = m.p2g;
-    if (side === 'p1') p1g++; else p2g++;
-    var status = 'progress', winner = null;
-    if (p1g >= 2) { status = 'done'; winner = m.p1; }
-    else if (p2g >= 2) { status = 'done'; winner = m.p2; }
-    return Object.assign({}, m, { p1g: p1g, p2g: p2g, status: status, winner: winner });
+  requireUnlock(function () {
+    updateMatch(matchId, function (m) {
+      if (m.status === 'done') return m;
+      var p1g = m.p1g, p2g = m.p2g;
+      if (side === 'p1') p1g++; else p2g++;
+      var status = 'progress', winner = null;
+      if (p1g >= 2) { status = 'done'; winner = m.p1; }
+      else if (p2g >= 2) { status = 'done'; winner = m.p2; }
+      return Object.assign({}, m, { p1g: p1g, p2g: p2g, status: status, winner: winner });
+    });
   });
 }
 function decrementGame(matchId, side) {
-  updateMatch(matchId, function (m) {
-    if (m.status === 'done') return m;
-    var p1g = m.p1g, p2g = m.p2g;
-    if (side === 'p1' && p1g > 0) p1g--;
-    if (side === 'p2' && p2g > 0) p2g--;
-    return Object.assign({}, m, { p1g: p1g, p2g: p2g });
+  requireUnlock(function () {
+    updateMatch(matchId, function (m) {
+      if (m.status === 'done') return m;
+      var p1g = m.p1g, p2g = m.p2g;
+      if (side === 'p1' && p1g > 0) p1g--;
+      if (side === 'p2' && p2g > 0) p2g--;
+      return Object.assign({}, m, { p1g: p1g, p2g: p2g });
+    });
   });
 }
 function resetMatch(matchId) {
-  updateMatch(matchId, function (m) { return Object.assign({}, m, { p1g: 0, p2g: 0, status: 'pending', winner: null, deck: null }); });
+  requireUnlock(function () {
+    updateMatch(matchId, function (m) { return Object.assign({}, m, { p1g: 0, p2g: 0, status: 'pending', winner: null }); });
+  });
 }
-function submitDeck(matchId) {
-  var nameEl = document.getElementById('deck-name-' + matchId);
-  var pokEl = document.getElementById('deck-pok-' + matchId);
-  var errEl = document.getElementById('deck-err-' + matchId);
+
+/* ---------- per-round deck registration ---------- */
+function previewDeckImage(inputId, previewId) {
+  var fileInput = document.getElementById(inputId);
+  var previewEl = document.getElementById(previewId);
+  if (!fileInput || !previewEl) return;
+  if (!fileInput.files || !fileInput.files[0]) { previewEl.innerHTML = ''; return; }
+  var file = fileInput.files[0];
+  if (file.type !== 'image/png' && file.type !== 'image/jpeg') {
+    previewEl.innerHTML = '<p style="color:var(--danger);font-size:12px;margin:6px 0 0;">Solo se aceptan archivos JPG o PNG.</p>';
+    return;
+  }
+  var url = URL.createObjectURL(file);
+  previewEl.innerHTML = '<img src="' + url + '" style="max-width:100%;max-height:200px;border-radius:8px;border:1px solid var(--line);margin:8px 0;display:block;" />';
+}
+
+function compressImageFile(file, maxDim, quality) {
+  return new Promise(function (resolve, reject) {
+    var reader = new FileReader();
+    reader.onload = function () {
+      var img = new Image();
+      img.onload = function () {
+        var scale = Math.min(1, maxDim / Math.max(img.width, img.height));
+        var w = Math.max(1, Math.round(img.width * scale));
+        var h = Math.max(1, Math.round(img.height * scale));
+        var canvas = document.createElement('canvas');
+        canvas.width = w; canvas.height = h;
+        canvas.getContext('2d').drawImage(img, 0, 0, w, h);
+        resolve(canvas.toDataURL('image/jpeg', quality));
+      };
+      img.onerror = function () { reject(new Error('img')); };
+      img.src = reader.result;
+    };
+    reader.onerror = function () { reject(new Error('read')); };
+    reader.readAsDataURL(file);
+  });
+}
+
+function submitRoundDeck(roundNumber, playerId) {
+  var idBase = 'rdeck-' + roundNumber + '-' + playerId;
+  var nameEl = document.getElementById(idBase + '-name');
+  var pokEl = document.getElementById(idBase + '-pok');
+  var errEl = document.getElementById(idBase + '-err');
+  var fileInput = document.getElementById(idBase + '-img');
+  var btn = document.getElementById(idBase + '-btn');
   var name = nameEl.value.trim();
   var pokemons = pokEl.value.split(',').map(function (s) { return s.trim(); }).filter(Boolean);
   if (!name || pokemons.length === 0) { if (errEl) errEl.textContent = 'Completa el nombre del mazo y al menos un Pokémon.'; return; }
-  updateMatch(matchId, function (m) { return Object.assign({}, m, { deck: { name: name, pokemons: pokemons } }); });
+  var file = fileInput && fileInput.files && fileInput.files[0];
+  function save(imageData) {
+    updateRoundDeck(roundNumber, playerId, { name: name, pokemons: pokemons, image: imageData || null });
+  }
+  if (file) {
+    if (file.type !== 'image/png' && file.type !== 'image/jpeg') { if (errEl) errEl.textContent = 'La imagen debe ser JPG o PNG.'; return; }
+    if (btn) { btn.disabled = true; btn.textContent = 'Guardando…'; }
+    compressImageFile(file, 720, 0.62).then(save).catch(function () { save(null); });
+  } else {
+    save(null);
+  }
 }
 
-function analyzeDeckImage(matchId) {
-  var fileInput = document.getElementById('deck-img-' + matchId);
-  var statusEl = document.getElementById('deck-analyze-status-' + matchId);
-  var btn = document.getElementById('deck-analyze-btn-' + matchId);
-  if (!fileInput || !fileInput.files || !fileInput.files[0]) {
-    statusEl.textContent = 'Selecciona una imagen primero.'; statusEl.style.color = 'var(--danger)'; return;
-  }
-  var file = fileInput.files[0];
-  if (file.type !== 'image/png' && file.type !== 'image/jpeg') {
-    statusEl.textContent = 'Solo se aceptan archivos JPG o PNG.'; statusEl.style.color = 'var(--danger)'; return;
-  }
-  statusEl.textContent = 'Analizando la captura…'; statusEl.style.color = 'var(--muted)';
-  btn.disabled = true;
-  var reader = new FileReader();
-  reader.onload = function () {
-    var base64 = reader.result.split(',')[1];
-    fetch('/api/analyze-deck', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ image: base64, mediaType: file.type })
-    }).then(function (r) { return r.json(); }).then(function (data) {
-      btn.disabled = false;
-      if (data.error) {
-        statusEl.textContent = data.error + ' Complétalo a mano.'; statusEl.style.color = 'var(--danger)'; return;
-      }
-      var nameEl = document.getElementById('deck-name-' + matchId);
-      var pokEl = document.getElementById('deck-pok-' + matchId);
-      if (nameEl) nameEl.value = data.deckName || '';
-      if (pokEl) pokEl.value = (data.pokemons || []).join(', ');
-      statusEl.textContent = 'Listo — revisa los datos y corrígelos si hace falta antes de guardar.';
-      statusEl.style.color = 'var(--success)';
-    }).catch(function () {
-      btn.disabled = false;
-      statusEl.textContent = 'No se pudo analizar la imagen. Complétalo a mano.';
-      statusEl.style.color = 'var(--danger)';
-    });
-  };
-  reader.onerror = function () {
-    btn.disabled = false;
-    statusEl.textContent = 'No se pudo leer el archivo.'; statusEl.style.color = 'var(--danger)';
-  };
-  reader.readAsDataURL(file);
+function editRoundDeck(roundNumber, playerId) {
+  requireUnlock(function () { updateRoundDeck(roundNumber, playerId, null); });
 }
 
 function setTab(t) { ui.tab = t; ui.viewRoundIdx = null; render(); }
 function prevRound() { var idx = ui.viewRoundIdx === null ? state.rounds.length - 1 : ui.viewRoundIdx; ui.viewRoundIdx = Math.max(0, idx - 1); render(); }
 function nextRound() { var idx = ui.viewRoundIdx === null ? state.rounds.length - 1 : ui.viewRoundIdx; ui.viewRoundIdx = Math.min(state.rounds.length - 1, idx + 1); render(); }
 
-function showConfirmReset() { ui.confirmReset = true; render(); }
+function showConfirmReset() { requireUnlock(function () { ui.confirmReset = true; render(); }); }
 function cancelReset() { ui.confirmReset = false; render(); }
 function confirmResetYes() {
-  localStorage.removeItem(STORAGE_KEY);
-  state = null;
-  ui = { tab: 'ronda', viewRoundIdx: null, confirmReset: false, formError: '' };
-  render();
+  requireUnlock(function () {
+    localStorage.removeItem(STORAGE_KEY);
+    try { sessionStorage.removeItem(lockFlagKey()); } catch (e) {}
+    state = null;
+    ui = { tab: 'ronda', viewRoundIdx: null, confirmReset: false, formError: '' };
+    render();
+  });
 }
 
 /* ---------- render: setup screen ---------- */
@@ -285,6 +342,9 @@ function renderSetup() {
       '<div class="card">' +
         '<label style="display:block;font-size:12.5px;color:var(--muted);margin-bottom:6px;">Nombre del torneo</label>' +
         '<input type="text" id="tournamentName" value="Copa Energía Asignada" style="margin-bottom:18px;" />' +
+        '<label style="display:block;font-size:12.5px;color:var(--muted);margin-bottom:6px;">PIN de organizador (mínimo 4 caracteres)</label>' +
+        '<input type="text" id="organizerPin" placeholder="Ej. 4127" style="margin-bottom:6px;" />' +
+        '<p style="color:var(--muted);font-size:11.5px;margin:0 0 18px;">La app lo pedirá para reportar resultados, generar rondas, corregir mazos ya guardados o reiniciar el torneo. Los jugadores solo pueden registrar su propio mazo, sin PIN.</p>' +
         '<label style="display:block;font-size:12.5px;color:var(--muted);margin-bottom:6px;">Jugadores — uno por línea (mínimo 32, máximo 128)</label>' +
         '<textarea id="playerNames" rows="10" placeholder="Ash Ketchum\nMisty Waterflower\nBrock Harrison\n..." style="resize:vertical;"></textarea>' +
         '<p id="setupError" style="color:var(--danger);font-size:12.5px;margin:10px 0 0;"></p>' +
@@ -294,47 +354,95 @@ function renderSetup() {
   );
 }
 
+/* ---------- render: deck slot (per player, per round) ---------- */
+function renderRoundDeckSlot(round, playerId, name) {
+  var deck = (round.decks || {})[playerId];
+  var idBase = 'rdeck-' + round.number + '-' + playerId;
+  if (deck) {
+    return (
+      '<div style="padding:10px 12px;background:var(--panel-alt);border-radius:8px;border:1px solid var(--line);">' +
+        '<div style="display:flex;justify-content:space-between;align-items:flex-start;gap:8px;">' +
+          '<div><p style="margin:0;font-size:12.5px;color:var(--accent);font-weight:600;">' + esc(name) + '</p>' +
+          '<p style="margin:2px 0 0;font-size:12.5px;font-weight:600;">' + esc(deck.name) + '</p>' +
+          '<p style="margin:3px 0 0;font-size:12px;color:var(--muted);">' + deck.pokemons.map(esc).join(' · ') + '</p></div>' +
+          '<button class="btn btn-secondary btn-sm" onclick="editRoundDeck(' + round.number + ',\'' + playerId + '\')">Editar</button>' +
+        '</div>' +
+        (deck.image ? '<img src="' + deck.image + '" style="max-width:100%;max-height:170px;border-radius:6px;margin-top:8px;display:block;" />' : '') +
+      '</div>'
+    );
+  }
+  return (
+    '<div style="padding:12px;background:var(--panel-alt);border-radius:8px;border:1px solid var(--line);">' +
+      '<p style="font-size:12.5px;color:var(--accent);font-weight:600;margin:0 0 8px;">Mazo de ' + esc(name) + ' — ronda ' + round.number + '</p>' +
+      '<label style="display:block;font-size:11.5px;color:var(--muted);margin-bottom:4px;">Sube la captura de tu mazo (se guarda)</label>' +
+      '<input type="file" accept="image/png,image/jpeg" id="' + idBase + '-img" onchange="previewDeckImage(\'' + idBase + '-img\',\'' + idBase + '-preview\')" style="width:100%;font-size:12.5px;color:var(--text);margin-bottom:4px;" />' +
+      '<div id="' + idBase + '-preview"></div>' +
+      '<input type="text" id="' + idBase + '-name" placeholder="Nombre del mazo (ej. Pikachu ex / Raichu)" style="margin:8px 0;" />' +
+      '<input type="text" id="' + idBase + '-pok" placeholder="Pokémon usados, separados por coma" />' +
+      '<p id="' + idBase + '-err" style="color:var(--danger);font-size:12px;margin:6px 0 0;"></p>' +
+      '<div style="margin-top:10px;"><button class="btn btn-primary btn-sm" id="' + idBase + '-btn" onclick="submitRoundDeck(' + round.number + ',\'' + playerId + '\')">Guardar mazo</button></div>' +
+    '</div>'
+  );
+}
+
 /* ---------- render: match card ---------- */
-function renderMatchCard(st, m) {
+function renderMatchCard(st, round, m) {
   if (m.bye) {
     var p1 = esc(playerName(st, m.p1));
-    return (
+    var html = (
       '<div class="card" style="padding:16px;">' +
         '<div style="display:flex;justify-content:space-between;align-items:center;">' +
           '<div><p class="display" style="font-size:18px;margin:0;">' + p1 + '</p>' +
           '<p style="margin:2px 0 0;font-size:12.5px;color:var(--muted);">Descanso de la ronda — victoria automática</p></div>' +
           '<span class="badge" style="background:var(--success-bg);color:var(--success-text);border:none;">BYE</span>' +
-        '</div>' +
-      '</div>'
+        '</div>'
     );
+    html += '<div style="margin-top:12px;">' + renderRoundDeckSlot(round, m.p1, playerName(st, m.p1)) + '</div>';
+    html += '</div>';
+    return html;
   }
   var p1n = esc(playerName(st, m.p1)), p2n = esc(playerName(st, m.p2));
+  var deck1 = (round.decks || {})[m.p1], deck2 = (round.decks || {})[m.p2];
   var done = m.status === 'done';
   var winnerName = done ? playerName(st, m.winner) : null;
   var c1 = winnerName === playerName(st, m.p1) ? 'var(--success)' : 'var(--text)';
   var c2 = winnerName === playerName(st, m.p2) ? 'var(--success)' : 'var(--text)';
+  var deckColor1 = !done ? 'var(--muted)' : (m.winner === m.p1 ? 'var(--success)' : 'var(--danger)');
+  var deckColor2 = !done ? 'var(--muted)' : (m.winner === m.p2 ? 'var(--success)' : 'var(--danger)');
   var html = '<div class="card" style="padding:16px;">';
   html += '<div style="display:grid;grid-template-columns:1fr auto 1fr;align-items:center;gap:10px;">';
-  html += '<p class="display" style="font-size:18px;margin:0;text-align:right;color:' + c1 + ';">' + p1n + '</p>';
+  html += '<div style="text-align:right;"><p class="display" style="font-size:18px;margin:0;color:' + c1 + ';">' + p1n + '</p>' +
+            (deck1 ? '<p style="margin:2px 0 0;font-size:11.5px;font-weight:600;color:' + deckColor1 + ';">' + esc(deck1.name) + '</p>' : '') + '</div>';
   html += '<div style="display:flex;align-items:center;gap:8px;">' +
             '<span class="display" style="font-size:26px;color:var(--accent);min-width:24px;text-align:center;">' + m.p1g + '</span>' +
             '<span style="color:var(--muted);">–</span>' +
             '<span class="display" style="font-size:26px;color:var(--accent);min-width:24px;text-align:center;">' + m.p2g + '</span>' +
           '</div>';
-  html += '<p class="display" style="font-size:18px;margin:0;text-align:left;color:' + c2 + ';">' + p2n + '</p>';
+  html += '<div style="text-align:left;"><p class="display" style="font-size:18px;margin:0;color:' + c2 + ';">' + p2n + '</p>' +
+            (deck2 ? '<p style="margin:2px 0 0;font-size:11.5px;font-weight:600;color:' + deckColor2 + ';">' + esc(deck2.name) + '</p>' : '') + '</div>';
   html += '</div>';
 
+  var bothDecksIn = !!deck1 && !!deck2;
+
   if (!done) {
-    html += '<div style="display:grid;grid-template-columns:1fr auto 1fr;align-items:center;gap:10px;margin-top:12px;">';
-    html += '<div style="display:flex;justify-content:flex-end;gap:6px;">' +
-              '<button class="btn btn-secondary btn-sm" ' + (m.p1g === 0 ? 'disabled' : '') + ' onclick="decrementGame(\'' + m.id + '\',\'p1\')">−</button>' +
-              '<button class="btn btn-ghost btn-sm" onclick="incrementGame(\'' + m.id + '\',\'p1\')">+1 partida</button>' +
-            '</div><div></div>' +
-            '<div style="display:flex;gap:6px;">' +
-              '<button class="btn btn-ghost btn-sm" onclick="incrementGame(\'' + m.id + '\',\'p2\')">+1 partida</button>' +
-              '<button class="btn btn-secondary btn-sm" ' + (m.p2g === 0 ? 'disabled' : '') + ' onclick="decrementGame(\'' + m.id + '\',\'p2\')">−</button>' +
-            '</div>';
-    html += '</div>';
+    if (!bothDecksIn) {
+      html += '<p style="margin:14px 0 8px;font-size:12px;color:var(--muted);text-align:center;">Cada jugador registra su mazo de esta ronda antes de poder reportar el resultado.</p>';
+      html += '<div style="display:grid;gap:10px;grid-template-columns:1fr 1fr;">';
+      html += '<div>' + renderRoundDeckSlot(round, m.p1, playerName(st, m.p1)) + '</div>';
+      html += '<div>' + renderRoundDeckSlot(round, m.p2, playerName(st, m.p2)) + '</div>';
+      html += '</div>';
+    } else {
+      html += '<div style="display:grid;grid-template-columns:1fr auto 1fr;align-items:center;gap:10px;margin-top:12px;">';
+      html += '<div style="display:flex;justify-content:flex-end;gap:6px;">' +
+                '<button class="btn btn-secondary btn-sm" ' + (m.p1g === 0 ? 'disabled' : '') + ' onclick="decrementGame(\'' + m.id + '\',\'p1\')">−</button>' +
+                '<button class="btn btn-ghost btn-sm" onclick="incrementGame(\'' + m.id + '\',\'p1\')">+1 partida</button>' +
+              '</div><div></div>' +
+              '<div style="display:flex;gap:6px;">' +
+                '<button class="btn btn-ghost btn-sm" onclick="incrementGame(\'' + m.id + '\',\'p2\')">+1 partida</button>' +
+                '<button class="btn btn-secondary btn-sm" ' + (m.p2g === 0 ? 'disabled' : '') + ' onclick="decrementGame(\'' + m.id + '\',\'p2\')">−</button>' +
+              '</div>';
+      html += '</div>';
+    }
   }
 
   if (done) {
@@ -342,27 +450,6 @@ function renderMatchCard(st, m) {
               '<span class="badge" style="background:var(--success-bg);color:var(--success-text);border:none;">Ganó ' + esc(winnerName) + '</span>' +
               '<button class="btn btn-danger btn-sm" onclick="resetMatch(\'' + m.id + '\')">Corregir resultado</button>' +
             '</div>';
-    if (!m.deck) {
-      html += '<div style="margin-top:10px;padding:12px;background:var(--panel-alt);border-radius:8px;border:1px solid var(--line);">' +
-                '<p style="font-size:12.5px;color:var(--accent);font-weight:600;margin:0 0 8px;">Mazo ganador de ' + esc(winnerName) + '</p>' +
-                '<label style="display:block;font-size:12px;color:var(--muted);margin-bottom:6px;">Sube la captura del mazo (JPG o PNG) para autocompletar</label>' +
-                '<input type="file" accept="image/png,image/jpeg" id="deck-img-' + m.id + '" style="width:100%;font-size:12.5px;color:var(--text);margin-bottom:8px;" />' +
-                '<div style="margin-bottom:10px;display:flex;align-items:center;gap:8px;flex-wrap:wrap;">' +
-                  '<button class="btn btn-ghost btn-sm" id="deck-analyze-btn-' + m.id + '" onclick="analyzeDeckImage(\'' + m.id + '\')">Analizar captura</button>' +
-                  '<span id="deck-analyze-status-' + m.id + '" style="font-size:12px;color:var(--muted);"></span>' +
-                '</div>' +
-                '<p style="font-size:11.5px;color:var(--muted);margin:0 0 8px;">Revisa el resultado del análisis antes de guardar — puedes corregirlo aquí abajo.</p>' +
-                '<input type="text" id="deck-name-' + m.id + '" placeholder="Nombre del mazo (ej. Pikachu ex / Raichu)" style="margin-bottom:8px;" />' +
-                '<input type="text" id="deck-pok-' + m.id + '" placeholder="Pokémon usados, separados por coma" />' +
-                '<p id="deck-err-' + m.id + '" style="color:var(--danger);font-size:12px;margin:6px 0 0;"></p>' +
-                '<div style="margin-top:10px;"><button class="btn btn-primary btn-sm" onclick="submitDeck(\'' + m.id + '\')">Guardar mazo</button></div>' +
-              '</div>';
-    } else {
-      html += '<div style="margin-top:10px;padding:8px 12px;background:var(--panel-alt);border-radius:8px;border:1px solid var(--line);">' +
-                '<p style="margin:0;font-size:12.5px;color:var(--accent);font-weight:600;">' + esc(m.deck.name) + '</p>' +
-                '<p style="margin:3px 0 0;font-size:12px;color:var(--muted);">' + m.deck.pokemons.map(esc).join(' · ') + '</p>' +
-              '</div>';
-    }
   }
   html += '</div>';
   return html;
@@ -373,7 +460,7 @@ function renderRoundTab() {
   if (state.rounds.length === 0) {
     return '<div class="card" style="text-align:center;padding:32px;">' +
       '<p class="display" style="font-size:20px;margin:0 0 8px;">Listo para arrancar</p>' +
-      '<p style="color:var(--muted);font-size:13.5px;margin:0 0 18px;">Genera la ronda 1 para asignar la energía y los cruces iniciales.</p>' +
+      '<p style="color:var(--muted);font-size:13.5px;margin:0 0 18px;">Genera la ronda 1 para asignar la energía y los cruces. Cada jugador registrará su mazo de esa ronda (con foto) antes de reportar resultados.</p>' +
       '<button class="btn btn-primary" onclick="generateRound()">Generar ronda 1</button>' +
     '</div>';
   }
@@ -396,7 +483,7 @@ function renderRoundTab() {
   html += '</div>';
 
   html += '<div style="display:grid;gap:12px;">';
-  round.matches.forEach(function (m) { html += renderMatchCard(state, m); });
+  round.matches.forEach(function (m) { html += renderMatchCard(state, round, m); });
   html += '</div>';
 
   if (isCurrent) {
@@ -438,13 +525,17 @@ function renderStandingsTab() {
   return html;
 }
 
-/* ---------- render: players tab ---------- */
+/* ---------- render: players tab (solo lectura) ---------- */
 function renderPlayersTab() {
   var html = '<div class="card"><h2 style="font-size:24px;margin:0 0 4px;">Jugadores</h2>' +
-    '<p style="color:var(--muted);font-size:13.5px;margin:0 0 16px;">' + state.players.length + ' jugadores inscritos</p>' +
-    '<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(180px,1fr));gap:8px;">';
+    '<p style="color:var(--muted);font-size:13.5px;margin:0 0 16px;">' + state.players.length + ' jugadores inscritos. El mazo de cada uno se registra ronda por ronda en la pestaña "Ronda actual".</p>' +
+    '<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:8px;">';
   state.players.forEach(function (p) {
-    html += '<div style="padding:8px 12px;background:var(--panel-alt);border:1px solid var(--line);border-radius:6px;font-size:13px;">' + esc(p.name) + '</div>';
+    var roundsPlayed = state.rounds.filter(function (r) { return r.decks && r.decks[p.id]; }).length;
+    html += '<div style="padding:8px 12px;background:var(--panel-alt);border:1px solid var(--line);border-radius:6px;font-size:13px;">' +
+      '<p style="margin:0;font-weight:500;">' + esc(p.name) + '</p>' +
+      '<p style="margin:3px 0 0;font-size:11.5px;color:var(--muted);">' + roundsPlayed + ' de ' + state.rounds.length + ' mazo(s) registrado(s)</p>' +
+    '</div>';
   });
   html += '</div></div>';
   return html;
@@ -465,43 +556,108 @@ function bars(data, color, maxLabelWidth) {
   return html;
 }
 
-function renderAnalyticsTab() {
+function computeDeckUsage(st) {
   var pokemonCounts = {}, deckCounts = {};
-  state.rounds.forEach(function (r) {
-    r.matches.forEach(function (m) {
-      if (m.deck) {
-        var key = m.deck.name.trim();
-        deckCounts[key] = (deckCounts[key] || 0) + 1;
-        m.deck.pokemons.forEach(function (pk) {
-          var norm = pk.trim();
-          if (!norm) return;
-          pokemonCounts[norm] = (pokemonCounts[norm] || 0) + 1;
-        });
-      }
+  st.rounds.forEach(function (r) {
+    Object.keys(r.decks || {}).forEach(function (pid) {
+      var d = r.decks[pid];
+      var key = d.name.trim();
+      deckCounts[key] = (deckCounts[key] || 0) + 1;
+      d.pokemons.forEach(function (pk) {
+        var norm = pk.trim();
+        if (!norm) return;
+        pokemonCounts[norm] = (pokemonCounts[norm] || 0) + 1;
+      });
     });
   });
-  var totalDecks = Object.values(deckCounts).reduce(function (a, b) { return a + b; }, 0);
+  return { pokemonCounts: pokemonCounts, deckCounts: deckCounts };
+}
+
+function computeDeckStats(st) {
+  var stats = {};
+  function ensure(name) {
+    if (!stats[name]) stats[name] = { name: name, matches: 0, wins: 0 };
+    return stats[name];
+  }
+  st.rounds.forEach(function (r) {
+    r.matches.forEach(function (m) {
+      if (m.bye || m.status !== 'done') return;
+      var d1 = (r.decks || {})[m.p1], d2 = (r.decks || {})[m.p2];
+      if (d1) { var s1 = ensure(d1.name.trim()); s1.matches += 1; if (m.winner === m.p1) s1.wins += 1; }
+      if (d2) { var s2 = ensure(d2.name.trim()); s2.matches += 1; if (m.winner === m.p2) s2.wins += 1; }
+    });
+  });
+  return stats;
+}
+
+function buildRawRows(st) {
+  var rows = [];
+  st.rounds.forEach(function (r) {
+    st.players.forEach(function (p) {
+      var d = (r.decks || {})[p.id];
+      if (!d) return;
+      var result = '—';
+      r.matches.forEach(function (m) {
+        if (m.bye && m.p1 === p.id) { result = 'BYE'; return; }
+        if (m.p1 === p.id || m.p2 === p.id) {
+          result = (m.status !== 'done') ? 'pendiente' : (m.winner === p.id ? 'V' : 'D');
+        }
+      });
+      rows.push({ round: r.number, player: p.name, deck: d.name, pokemons: d.pokemons.join(' | '), result: result });
+    });
+  });
+  return rows;
+}
+
+function exportCsv() {
+  var rows = buildRawRows(state);
+  var csv = 'Ronda,Jugador,Mazo,Pokemon,Resultado\n';
+  rows.forEach(function (r) {
+    csv += [r.round, r.player, r.deck, r.pokemons, r.result].map(function (v) {
+      return '"' + String(v).replace(/"/g, '""') + '"';
+    }).join(',') + '\n';
+  });
+  var blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
+  var url = URL.createObjectURL(blob);
+  var a = document.createElement('a');
+  a.href = url;
+  a.download = (state.name || 'torneo').replace(/[^a-z0-9]+/gi, '_') + '_mazos.csv';
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  setTimeout(function () { URL.revokeObjectURL(url); }, 1000);
+}
+
+function renderAnalyticsTab() {
+  var usage = computeDeckUsage(state);
+  var totalDecks = Object.values(usage.deckCounts).reduce(function (a, b) { return a + b; }, 0);
   var header = '<h2 style="font-size:24px;margin:0 0 4px;">Analítica de mazos</h2>' +
-    '<p style="color:var(--muted);font-size:13.5px;margin:0 0 16px;">Basado en los mazos ganadores reportados en cada ronda — útil para tu tier list y deck list.</p>';
+    '<p style="color:var(--muted);font-size:13.5px;margin:0 0 12px;">Se guarda un mazo por jugador en cada ronda. Descarga el CSV con ronda, jugador, mazo, Pokémon y resultado para calcular tú mismo los mejores y peores Pokémon.</p>' +
+    '<div style="margin-bottom:16px;"><button class="btn btn-ghost btn-sm" onclick="exportCsv()">Descargar CSV</button></div>';
 
   if (totalDecks === 0) {
-    return header + '<div class="card"><p style="color:var(--muted);font-size:14px;margin:0;">Todavía no hay mazos registrados. En cuanto se reporten victorias con su mazo, aquí verás el Pokémon y el arquetipo más usados del torneo.</p></div>';
+    return header + '<div class="card"><p style="color:var(--muted);font-size:14px;margin:0;">Todavía no hay mazos registrados. En cuanto se registren en "Ronda actual", aquí verás las estadísticas.</p></div>';
   }
 
-  var pokemonData = Object.entries(pokemonCounts).sort(function (a, b) { return b[1] - a[1]; }).slice(0, 12).map(function (e) { return { name: e[0], count: e[1] }; });
-  var deckData = Object.entries(deckCounts).sort(function (a, b) { return b[1] - a[1]; }).slice(0, 12).map(function (e) { return { name: e[0], count: e[1] }; });
+  var pokemonData = Object.entries(usage.pokemonCounts).sort(function (a, b) { return b[1] - a[1]; }).slice(0, 12).map(function (e) { return { name: e[0], count: e[1] }; });
+  var deckData = Object.entries(usage.deckCounts).sort(function (a, b) { return b[1] - a[1]; }).slice(0, 12).map(function (e) { return { name: e[0], count: e[1] }; });
+  var deckStats = computeDeckStats(state);
+  var statsSorted = Object.values(deckStats).sort(function (a, b) { return b.matches - a.matches; });
 
   var html = header + '<div style="display:grid;gap:20px;">';
-  html += '<div class="card"><p class="display" style="font-size:18px;margin:0 0 12px;">Pokémon más usados</p>' + bars(pokemonData, 'var(--accent)') + '</div>';
+  html += '<div class="card"><p class="display" style="font-size:18px;margin:0 0 12px;">Pokémon más usados (todas las rondas)</p>' + bars(pokemonData, 'var(--accent)') + '</div>';
   html += '<div class="card"><p class="display" style="font-size:18px;margin:0 0 12px;">Mazos (arquetipos) más usados</p>' + bars(deckData, 'var(--blue)') + '</div>';
 
-  html += '<div class="card"><p class="display" style="font-size:18px;margin:0 0 12px;">Tabla para tu tier list</p>' +
-    '<table><thead><tr><th>Mazo</th><th style="text-align:center;">Veces ganador</th><th style="text-align:center;">% del total</th></tr></thead><tbody>';
-  Object.entries(deckCounts).sort(function (a, b) { return b[1] - a[1]; }).forEach(function (e, i) {
+  html += '<div class="card"><p class="display" style="font-size:18px;margin:0 0 12px;">Winrate automático por mazo</p>' +
+    '<p style="color:var(--muted);font-size:12.5px;margin:0 0 12px;">Suma de todas las rondas jugadas — es solo una referencia rápida; el CSV trae el detalle completo por si prefieres calcularlo tú mismo.</p>' +
+    '<table><thead><tr><th>Mazo</th><th style="text-align:center;">Partidas</th><th style="text-align:center;">Victorias</th><th style="text-align:center;">Winrate</th></tr></thead><tbody>';
+  statsSorted.forEach(function (s, i) {
+    var wr = s.matches > 0 ? Math.round((s.wins / s.matches) * 100) : null;
     html += '<tr style="background:' + (i % 2 === 0 ? 'transparent' : 'var(--panel-alt)') + ';">' +
-      '<td>' + esc(e[0]) + '</td>' +
-      '<td style="text-align:center;color:var(--accent);font-weight:600;">' + e[1] + '</td>' +
-      '<td style="text-align:center;color:var(--muted);">' + Math.round((e[1] / totalDecks) * 100) + '%</td>' +
+      '<td>' + esc(s.name) + '</td>' +
+      '<td style="text-align:center;color:var(--muted);">' + s.matches + '</td>' +
+      '<td style="text-align:center;color:var(--muted);">' + s.wins + '</td>' +
+      '<td style="text-align:center;color:var(--accent);font-weight:700;">' + (wr === null ? '—' : wr + '%') + '</td>' +
     '</tr>';
   });
   html += '</tbody></table></div>';
@@ -517,6 +673,7 @@ function render() {
   var currentIdx = state.rounds.length - 1;
   var currentComplete = currentIdx >= 0 ? state.rounds[currentIdx].matches.every(function (m) { return m.status === 'done'; }) : true;
   var finished = state.rounds.length === 8 && currentComplete;
+  var unlocked = isUnlocked();
 
   var tabs = [
     { id: 'ronda', label: 'Ronda actual' },
@@ -533,6 +690,9 @@ function render() {
             '<span class="badge">' + state.players.length + ' jugadores</span>' +
             '<span class="badge">Ronda ' + Math.max(state.rounds.length, 0) + '/8</span>' +
             (finished ? '<span class="badge" style="background:var(--success-bg);color:var(--success-text);border:none;">Torneo finalizado</span>' : '') +
+            (unlocked
+              ? '<span class="badge" style="background:var(--success-bg);color:var(--success-text);border:none;">🔓 Organizador</span><button class="btn btn-secondary btn-sm" onclick="lockOrganizer()">Bloquear</button>'
+              : '<span class="badge">🔒 Modo jugador</span><button class="btn btn-ghost btn-sm" onclick="unlockOrganizer()">Desbloquear</button>') +
           '</div></div>';
 
   html += '<div style="display:flex;gap:4px;padding:0 24px;border-bottom:1px solid var(--line);background:var(--panel);overflow-x:auto;">';
@@ -543,7 +703,7 @@ function render() {
 
   html += '<div style="padding:24px;max-width:900px;margin:0 auto;width:100%;">';
   if (ui.formError === 'save') {
-    html += '<div style="margin-bottom:16px;padding:10px 14px;background:var(--danger-dark);border:1px solid var(--danger);border-radius:8px;color:#FBD7D5;font-size:13px;">No se pudo guardar el último cambio en este navegador. Revisa el espacio de almacenamiento disponible.</div>';
+    html += '<div style="margin-bottom:16px;padding:10px 14px;background:var(--danger-dark);border:1px solid var(--danger);border-radius:8px;color:#FBD7D5;font-size:13px;">No se pudo guardar el último cambio en este navegador. Revisa el espacio de almacenamiento disponible (las fotos de mazo ocupan espacio; si se llena, borra fotos de rondas viejas).</div>';
   }
 
   if (ui.tab === 'ronda') html += renderRoundTab();
@@ -552,7 +712,7 @@ function render() {
   else if (ui.tab === 'analitica') html += renderAnalyticsTab();
 
   html += '<div style="margin-top:32px;border-top:1px solid var(--line);padding-top:16px;display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:10px;">';
-  html += '<span style="font-size:12px;color:var(--muted);">Los datos se guardan en este navegador (almacenamiento local).</span>';
+  html += '<span style="font-size:12px;color:var(--muted);">Los datos se guardan en este navegador (almacenamiento local), incluidas las fotos de mazo.</span>';
   if (!ui.confirmReset) {
     html += '<button class="btn btn-danger btn-sm" onclick="showConfirmReset()">Reiniciar torneo</button>';
   } else {

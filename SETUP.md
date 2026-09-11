@@ -1,52 +1,59 @@
-# Cómo activar el análisis automático de capturas
+# Cómo funciona (sin costo, sin backend)
 
-El análisis de la imagen (identificar nombre del mazo y Pokémon usados) necesita un
-backend, porque requiere llamar a la API de Claude con una API key que **nunca debe
-quedar expuesta en el HTML**. Por eso esto ya NO puede correr en GitHub Pages (que solo
-sirve archivos estáticos) — necesita **Cloudflare Pages**, que sí permite correr
-funciones (`functions/api/analyze-deck.js`) de forma gratuita.
+La app es 100% estática: no necesita servidor, API keys ni facturación de ningún
+tipo. Todo corre en el navegador y los datos se guardan en `localStorage`,
+incluidas las fotos de los mazos.
 
-## Estructura de archivos (así debe quedar el repo)
+## Mazo por ronda
 
-```
-tu-repo/
-├── index.html
-└── functions/
-    └── api/
-        └── analyze-deck.js
-```
+Cada jugador registra su mazo **en cada ronda** (no una sola vez al inicio):
 
-## Pasos
+1. En la pestaña "Ronda actual", junto a cada enfrentamiento, cada jugador sube
+   la foto de su mazo de esa ronda. La foto sí se guarda (comprimida
+   automáticamente para no llenar el almacenamiento del navegador).
+2. Escribe el nombre del mazo y los Pokémon usados.
+3. Pulsa "Guardar mazo".
 
-1. **Sube ambos** (`index.html` y la carpeta `functions/`) a tu repositorio de GitHub,
-   respetando exactamente esa estructura de carpetas.
+Mientras a un jugador le falte registrar su mazo de la ronda, no se pueden
+reportar los resultados de esa partida — es obligatorio para poder jugar.
 
-2. **Consigue una API key de Anthropic:**
-   - Entra a https://console.anthropic.com
-   - Ve a "API Keys" y crea una nueva key.
-   - Necesitas tener crédito/facturación activa en esa cuenta — cada análisis de imagen
-     tiene un costo pequeño (fracciones de centavo por captura).
+## PIN de organizador — los jugadores no pueden tocar nada más
 
-3. **Conecta el repo a Cloudflare Pages:**
-   - Entra a tu dashboard de Cloudflare → Workers & Pages → Create → Pages →
-     conecta tu repositorio de GitHub.
-   - Cloudflare detecta automáticamente la carpeta `functions/` y publica
-     `/api/analyze-deck` como endpoint — no necesitas configurar ningún build command
-     (déjalo vacío) ni carpeta de salida especial (usa la raíz).
+Al crear el torneo defines un PIN. La app lo pide para:
+- Reportar o corregir el marcador de una partida.
+- Generar la siguiente ronda.
+- Editar un mazo que ya fue guardado.
+- Reiniciar el torneo.
 
-4. **Agrega tu API key como secreto:**
-   - En el proyecto de Cloudflare Pages → Settings → Environment variables.
-   - Agrega una variable llamada exactamente `ANTHROPIC_API_KEY`, pega tu key, márcala
-     como **secreta** (encrypted).
-   - Guarda y vuelve a desplegar (Cloudflare a veces pide un redeploy para que la
-     variable tome efecto).
+Registrar el propio mazo (mientras no se haya guardado todavía) **no** pide
+PIN — es lo único que un jugador puede hacer por su cuenta. Una vez que
+desbloqueas con el PIN, queda desbloqueado mientras la pestaña del navegador
+siga abierta; puedes pulsar "Bloquear" antes de pasarle el teléfono/tablet a
+un jugador.
 
-5. Listo. En la app, cuando un jugador gane, el organizador puede subir la captura del
-   mazo (JPG o PNG), pulsar "Analizar captura" y el nombre del mazo y los Pokémon se
-   autocompletan — siempre editables antes de guardar, por si el análisis se equivoca.
+Nota: como es una app sin cuentas de usuario, el PIN protege la administración
+del torneo, pero no puede verificar "quién" está tecleando en un dispositivo
+compartido — es un candado práctico para un torneo presencial, no una
+seguridad a prueba de todo.
 
-## Nota importante
+## Colores ganador / perdedor
 
-El resto de los datos del torneo (jugadores, rondas, resultados) se sigue guardando en
-el navegador (`localStorage`), como en la versión anterior — esto no cambia. Lo único
-que ahora pasa por un servidor es el análisis puntual de cada imagen.
+Al reportar el resultado de una partida, el nombre del mazo de cada jugador se
+pinta:
+- **Verde** si ganó esa partida.
+- **Rojo** si la perdió.
+
+## Datos para tu análisis manual
+
+En la pestaña **Analítica** hay un botón "Descargar CSV" con una fila por
+jugador y ronda: Ronda, Jugador, Mazo, Pokémon, Resultado (V/D/BYE). Es la
+base para que calcules tú mismo el winrate de cada Pokémon o arquetipo (mejor
+y peor desempeño) en la hoja de cálculo que prefieras. La app también muestra
+un winrate automático por mazo como referencia rápida, pero el CSV trae el
+detalle completo.
+
+## Hosting
+
+Un solo archivo estático (`index.html`) — puedes subirlo a cualquier hosting
+gratuito: GitHub Pages, Netlify, Cloudflare Pages, etc. No hace falta ninguna
+carpeta `functions/` ni variables de entorno.
