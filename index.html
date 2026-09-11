@@ -219,6 +219,50 @@ function submitDeck(matchId) {
   updateMatch(matchId, function (m) { return Object.assign({}, m, { deck: { name: name, pokemons: pokemons } }); });
 }
 
+function analyzeDeckImage(matchId) {
+  var fileInput = document.getElementById('deck-img-' + matchId);
+  var statusEl = document.getElementById('deck-analyze-status-' + matchId);
+  var btn = document.getElementById('deck-analyze-btn-' + matchId);
+  if (!fileInput || !fileInput.files || !fileInput.files[0]) {
+    statusEl.textContent = 'Selecciona una imagen primero.'; statusEl.style.color = 'var(--danger)'; return;
+  }
+  var file = fileInput.files[0];
+  if (file.type !== 'image/png' && file.type !== 'image/jpeg') {
+    statusEl.textContent = 'Solo se aceptan archivos JPG o PNG.'; statusEl.style.color = 'var(--danger)'; return;
+  }
+  statusEl.textContent = 'Analizando la captura…'; statusEl.style.color = 'var(--muted)';
+  btn.disabled = true;
+  var reader = new FileReader();
+  reader.onload = function () {
+    var base64 = reader.result.split(',')[1];
+    fetch('/api/analyze-deck', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ image: base64, mediaType: file.type })
+    }).then(function (r) { return r.json(); }).then(function (data) {
+      btn.disabled = false;
+      if (data.error) {
+        statusEl.textContent = data.error + ' Complétalo a mano.'; statusEl.style.color = 'var(--danger)'; return;
+      }
+      var nameEl = document.getElementById('deck-name-' + matchId);
+      var pokEl = document.getElementById('deck-pok-' + matchId);
+      if (nameEl) nameEl.value = data.deckName || '';
+      if (pokEl) pokEl.value = (data.pokemons || []).join(', ');
+      statusEl.textContent = 'Listo — revisa los datos y corrígelos si hace falta antes de guardar.';
+      statusEl.style.color = 'var(--success)';
+    }).catch(function () {
+      btn.disabled = false;
+      statusEl.textContent = 'No se pudo analizar la imagen. Complétalo a mano.';
+      statusEl.style.color = 'var(--danger)';
+    });
+  };
+  reader.onerror = function () {
+    btn.disabled = false;
+    statusEl.textContent = 'No se pudo leer el archivo.'; statusEl.style.color = 'var(--danger)';
+  };
+  reader.readAsDataURL(file);
+}
+
 function setTab(t) { ui.tab = t; ui.viewRoundIdx = null; render(); }
 function prevRound() { var idx = ui.viewRoundIdx === null ? state.rounds.length - 1 : ui.viewRoundIdx; ui.viewRoundIdx = Math.max(0, idx - 1); render(); }
 function nextRound() { var idx = ui.viewRoundIdx === null ? state.rounds.length - 1 : ui.viewRoundIdx; ui.viewRoundIdx = Math.min(state.rounds.length - 1, idx + 1); render(); }
@@ -301,6 +345,13 @@ function renderMatchCard(st, m) {
     if (!m.deck) {
       html += '<div style="margin-top:10px;padding:12px;background:var(--panel-alt);border-radius:8px;border:1px solid var(--line);">' +
                 '<p style="font-size:12.5px;color:var(--accent);font-weight:600;margin:0 0 8px;">Mazo ganador de ' + esc(winnerName) + '</p>' +
+                '<label style="display:block;font-size:12px;color:var(--muted);margin-bottom:6px;">Sube la captura del mazo (JPG o PNG) para autocompletar</label>' +
+                '<input type="file" accept="image/png,image/jpeg" id="deck-img-' + m.id + '" style="width:100%;font-size:12.5px;color:var(--text);margin-bottom:8px;" />' +
+                '<div style="margin-bottom:10px;display:flex;align-items:center;gap:8px;flex-wrap:wrap;">' +
+                  '<button class="btn btn-ghost btn-sm" id="deck-analyze-btn-' + m.id + '" onclick="analyzeDeckImage(\'' + m.id + '\')">Analizar captura</button>' +
+                  '<span id="deck-analyze-status-' + m.id + '" style="font-size:12px;color:var(--muted);"></span>' +
+                '</div>' +
+                '<p style="font-size:11.5px;color:var(--muted);margin:0 0 8px;">Revisa el resultado del análisis antes de guardar — puedes corregirlo aquí abajo.</p>' +
                 '<input type="text" id="deck-name-' + m.id + '" placeholder="Nombre del mazo (ej. Pikachu ex / Raichu)" style="margin-bottom:8px;" />' +
                 '<input type="text" id="deck-pok-' + m.id + '" placeholder="Pokémon usados, separados por coma" />' +
                 '<p id="deck-err-' + m.id + '" style="color:var(--danger);font-size:12px;margin:6px 0 0;"></p>' +
