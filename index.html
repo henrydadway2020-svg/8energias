@@ -92,7 +92,7 @@ var MAX_PLAYERS = 128;
 var TOURNAMENT_DOC_ID = 'main'; /* un solo torneo por cada despliegue de esta página */
 
 /* ---------- ephemeral UI + synced state ---------- */
-var ui = { tab: 'ronda', viewRoundIdx: null, galleryRoundIdx: null, gallerySearch: '', lightbox: null, confirmReset: false, formError: '', loading: true, loadError: false };
+var ui = { tab: 'ronda', viewRoundIdx: null, galleryView: 'registro', galleryRoundIdx: null, gallerySearch: '', lightbox: null, confirmReset: false, formError: '', loading: true, loadError: false };
 var galleryEntries = []; /* se reconstruye en cada render de la pestaña Galería, para poder abrir el lightbox por índice sin inflar los onclick con el data URL completo */
 var state = null; /* se llena en vivo desde Firestore */
 
@@ -470,6 +470,7 @@ function prevRound() { var idx = ui.viewRoundIdx === null ? state.rounds.length 
 function nextRound() { var idx = ui.viewRoundIdx === null ? state.rounds.length - 1 : ui.viewRoundIdx; ui.viewRoundIdx = Math.min(state.rounds.length - 1, idx + 1); render(); }
 
 /* ---------- galería de mazos ---------- */
+function setGalleryView(v) { ui.galleryView = v; ui.gallerySearch = ''; render(); }
 function setGalleryRound(idx) { ui.galleryRoundIdx = Math.max(0, Math.min(state.rounds.length - 1, idx)); render(); }
 function setGallerySearch(v) { ui.gallerySearch = v; render(); }
 function openDeckLightbox(i) {
@@ -508,7 +509,7 @@ function confirmResetYes() {
       return tournamentRef().delete();
     }).then(function () {
       try { sessionStorage.removeItem(lockFlagKey()); } catch (e) {}
-      ui = { tab: 'ronda', viewRoundIdx: null, galleryRoundIdx: null, gallerySearch: '', lightbox: null, confirmReset: false, formError: '', loading: false, loadError: false };
+      ui = { tab: 'ronda', viewRoundIdx: null, galleryView: 'registro', galleryRoundIdx: null, gallerySearch: '', lightbox: null, confirmReset: false, formError: '', loading: false, loadError: false };
       /* el listener de meta detecta que el doc ya no existe y limpia "state" solo */
     }).catch(function (err) {
       console.error(err);
@@ -791,12 +792,49 @@ function renderPlayersTab() {
 }
 
 /* ---------- render: gallery tab ---------- */
-function renderGalleryTab() {
+function renderGalleryViewSwitcher() {
+  return '<div style="display:flex;gap:8px;margin-bottom:16px;">' +
+    '<button class="btn ' + (ui.galleryView === 'registro' ? 'btn-primary' : 'btn-ghost') + ' btn-sm" onclick="setGalleryView(\'registro\')">Fotos de registro</button>' +
+    '<button class="btn ' + (ui.galleryView === 'mazos' ? 'btn-primary' : 'btn-ghost') + ' btn-sm" onclick="setGalleryView(\'mazos\')">Mazos por ronda</button>' +
+  '</div>';
+}
+
+function renderGalleryRegistrationView() {
+  var search = (ui.gallerySearch || '').trim().toLowerCase();
+  var entries = state.players
+    .filter(function (p) { return !!p.photo; })
+    .filter(function (p) { return !search || p.name.toLowerCase().indexOf(search) !== -1; })
+    .map(function (p) { return { player: p, image: p.photo }; });
+  galleryEntries = entries;
+  var withPhoto = state.players.filter(function (p) { return !!p.photo; }).length;
+
+  var html = '<div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:10px;margin-bottom:4px;">' +
+    '<h2 style="font-size:24px;margin:0;">Fotos de registro</h2>' +
+    '<span class="badge">' + withPhoto + ' de ' + state.players.length + ' jugadores</span>' +
+  '</div>';
+  html += '<p style="color:var(--muted);font-size:13.5px;margin:0 0 16px;">La foto que cada jugador subió al unirse al torneo. Se ve aquí en cuanto se registra, sin esperar a que arranque la ronda 1. Toca una foto para verla en grande.</p>';
+  html += '<input type="text" placeholder="Buscar jugador…" value="' + esc(ui.gallerySearch || '') + '" oninput="setGallerySearch(this.value)" style="max-width:240px;margin-bottom:14px;" />';
+
+  if (state.players.length === 0) {
+    html += '<p style="color:var(--muted);font-size:13.5px;">Todavía nadie se ha unido al torneo.</p>';
+  } else if (entries.length === 0) {
+    html += '<p style="color:var(--muted);font-size:13.5px;">Ningún jugador coincide con esa búsqueda.</p>';
+  } else {
+    html += '<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(140px,1fr));gap:12px;">';
+    entries.forEach(function (e, i) {
+      html += '<div style="cursor:zoom-in;" onclick="openDeckLightbox(' + i + ')">' +
+        '<img src="' + e.image + '" style="width:100%;aspect-ratio:1/1;object-fit:cover;border-radius:8px;border:1px solid var(--line);display:block;" />' +
+        '<p style="margin:6px 0 0;font-size:12px;font-weight:500;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">' + esc(e.player.name) + '</p>' +
+      '</div>';
+    });
+    html += '</div>';
+  }
+  return html;
+}
+
+function renderGalleryRoundsView() {
   if (state.rounds.length === 0) {
-    return '<div class="card" style="text-align:center;padding:32px;">' +
-      '<p class="display" style="font-size:20px;margin:0 0 8px;">Todavía no hay mazos</p>' +
-      '<p style="color:var(--muted);font-size:13.5px;margin:0;">En cuanto se genere la ronda 1 y los jugadores suban su mazo, aquí podrás ver todas las fotos juntas.</p>' +
-    '</div>';
+    return '<p style="color:var(--muted);font-size:13.5px;">Todavía no hay rondas. En cuanto se genere la ronda 1 y los jugadores suban su mazo, aquí podrás ver todas las fotos juntas.</p>';
   }
   var idx = ui.galleryRoundIdx === null ? state.rounds.length - 1 : Math.min(ui.galleryRoundIdx, state.rounds.length - 1);
   var round = state.rounds[idx];
@@ -812,9 +850,8 @@ function renderGalleryTab() {
 
   var totalWithDeck = state.players.filter(function (p) { return decks[p.id] && decks[p.id].image; }).length;
 
-  var html = '<div class="card">';
-  html += '<div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:10px;margin-bottom:4px;">' +
-    '<h2 style="font-size:24px;margin:0;">Galería de mazos</h2>' +
+  var html = '<div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:10px;margin-bottom:4px;">' +
+    '<h2 style="font-size:24px;margin:0;">Mazos por ronda</h2>' +
     '<span class="badge">' + totalWithDeck + ' de ' + state.players.length + ' subidos</span>' +
   '</div>';
   html += '<p style="color:var(--muted);font-size:13.5px;margin:0 0 16px;">Fotos de mazo que subió cada jugador en la ronda seleccionada. Toca una foto para verla en grande.</p>';
@@ -841,6 +878,13 @@ function renderGalleryTab() {
     });
     html += '</div>';
   }
+  return html;
+}
+
+function renderGalleryTab() {
+  var html = '<div class="card">';
+  html += renderGalleryViewSwitcher();
+  html += ui.galleryView === 'mazos' ? renderGalleryRoundsView() : renderGalleryRegistrationView();
   html += '</div>';
   return html;
 }
