@@ -92,7 +92,8 @@ var MAX_PLAYERS = 128;
 var TOURNAMENT_DOC_ID = 'main'; /* un solo torneo por cada despliegue de esta página */
 
 /* ---------- ephemeral UI + synced state ---------- */
-var ui = { tab: 'ronda', viewRoundIdx: null, confirmReset: false, formError: '', loading: true, loadError: false };
+var ui = { tab: 'ronda', viewRoundIdx: null, galleryRoundIdx: null, gallerySearch: '', lightbox: null, confirmReset: false, formError: '', loading: true, loadError: false };
+var galleryEntries = []; /* se reconstruye en cada render de la pestaña Galería, para poder abrir el lightbox por índice sin inflar los onclick con el data URL completo */
 var state = null; /* se llena en vivo desde Firestore */
 
 /* ---------- firebase / firestore refs ---------- */
@@ -468,6 +469,17 @@ function setTab(t) { ui.tab = t; ui.viewRoundIdx = null; render(); }
 function prevRound() { var idx = ui.viewRoundIdx === null ? state.rounds.length - 1 : ui.viewRoundIdx; ui.viewRoundIdx = Math.max(0, idx - 1); render(); }
 function nextRound() { var idx = ui.viewRoundIdx === null ? state.rounds.length - 1 : ui.viewRoundIdx; ui.viewRoundIdx = Math.min(state.rounds.length - 1, idx + 1); render(); }
 
+/* ---------- galería de mazos ---------- */
+function setGalleryRound(idx) { ui.galleryRoundIdx = Math.max(0, Math.min(state.rounds.length - 1, idx)); render(); }
+function setGallerySearch(v) { ui.gallerySearch = v; render(); }
+function openDeckLightbox(i) {
+  var e = galleryEntries[i];
+  if (!e) return;
+  ui.lightbox = { image: e.image, caption: e.player.name };
+  render();
+}
+function closeDeckLightbox() { ui.lightbox = null; render(); }
+
 function showConfirmReset() { requireUnlock(function () { ui.confirmReset = true; render(); }); }
 function cancelReset() { ui.confirmReset = false; render(); }
 
@@ -496,7 +508,7 @@ function confirmResetYes() {
       return tournamentRef().delete();
     }).then(function () {
       try { sessionStorage.removeItem(lockFlagKey()); } catch (e) {}
-      ui = { tab: 'ronda', viewRoundIdx: null, confirmReset: false, formError: '', loading: false, loadError: false };
+      ui = { tab: 'ronda', viewRoundIdx: null, galleryRoundIdx: null, gallerySearch: '', lightbox: null, confirmReset: false, formError: '', loading: false, loadError: false };
       /* el listener de meta detecta que el doc ya no existe y limpia "state" solo */
     }).catch(function (err) {
       console.error(err);
@@ -778,6 +790,61 @@ function renderPlayersTab() {
   return html;
 }
 
+/* ---------- render: gallery tab ---------- */
+function renderGalleryTab() {
+  if (state.rounds.length === 0) {
+    return '<div class="card" style="text-align:center;padding:32px;">' +
+      '<p class="display" style="font-size:20px;margin:0 0 8px;">Todavía no hay mazos</p>' +
+      '<p style="color:var(--muted);font-size:13.5px;margin:0;">En cuanto se genere la ronda 1 y los jugadores suban su mazo, aquí podrás ver todas las fotos juntas.</p>' +
+    '</div>';
+  }
+  var idx = ui.galleryRoundIdx === null ? state.rounds.length - 1 : Math.min(ui.galleryRoundIdx, state.rounds.length - 1);
+  var round = state.rounds[idx];
+  ensureDeckListener(round.number); /* misma ventana de datos que "Ronda actual": solo se baja la ronda que se está viendo */
+  var decks = round.decks || {};
+  var search = (ui.gallerySearch || '').trim().toLowerCase();
+
+  var entries = state.players
+    .filter(function (p) { return decks[p.id] && decks[p.id].image; })
+    .filter(function (p) { return !search || p.name.toLowerCase().indexOf(search) !== -1; })
+    .map(function (p) { return { player: p, image: decks[p.id].image }; });
+  galleryEntries = entries;
+
+  var totalWithDeck = state.players.filter(function (p) { return decks[p.id] && decks[p.id].image; }).length;
+
+  var html = '<div class="card">';
+  html += '<div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:10px;margin-bottom:4px;">' +
+    '<h2 style="font-size:24px;margin:0;">Galería de mazos</h2>' +
+    '<span class="badge">' + totalWithDeck + ' de ' + state.players.length + ' subidos</span>' +
+  '</div>';
+  html += '<p style="color:var(--muted);font-size:13.5px;margin:0 0 16px;">Fotos de mazo que subió cada jugador en la ronda seleccionada. Toca una foto para verla en grande.</p>';
+
+  html += '<div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:14px;">' +
+    '<button class="btn btn-secondary btn-sm" ' + (idx <= 0 ? 'disabled' : '') + ' onclick="setGalleryRound(' + (idx - 1) + ')">◀</button>' +
+    '<p class="display" style="font-size:16px;margin:0;">Ronda ' + round.number + ' de ' + state.rounds.length + '</p>' +
+    '<button class="btn btn-secondary btn-sm" ' + (idx >= state.rounds.length - 1 ? 'disabled' : '') + ' onclick="setGalleryRound(' + (idx + 1) + ')">▶</button>' +
+    '<input type="text" placeholder="Buscar jugador…" value="' + esc(ui.gallerySearch || '') + '" oninput="setGallerySearch(this.value)" style="max-width:200px;margin-left:auto;" />' +
+  '</div>';
+
+  if (entries.length === 0) {
+    html += '<p style="color:var(--muted);font-size:13.5px;">' + (totalWithDeck === 0 ? 'Nadie ha subido su mazo todavía en esta ronda.' : 'Ningún jugador coincide con esa búsqueda.') + '</p>';
+  } else {
+    html += '<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(140px,1fr));gap:12px;">';
+    entries.forEach(function (e, i) {
+      html += '<div style="cursor:zoom-in;" onclick="openDeckLightbox(' + i + ')">' +
+        '<img src="' + e.image + '" style="width:100%;aspect-ratio:3/4;object-fit:cover;border-radius:8px;border:1px solid var(--line);display:block;" />' +
+        '<div style="display:flex;align-items:center;gap:6px;margin-top:6px;">' +
+          avatarHtml(state, e.player.id, 18) +
+          '<p style="margin:0;font-size:12px;font-weight:500;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">' + esc(e.player.name) + '</p>' +
+        '</div>' +
+      '</div>';
+    });
+    html += '</div>';
+  }
+  html += '</div>';
+  return html;
+}
+
 /* ---------- render: analytics tab ---------- */
 function computeDeckUsage(st) {
   var totalDecks = 0;
@@ -855,6 +922,7 @@ function render() {
     { id: 'ronda', label: 'Ronda actual' },
     { id: 'clasificacion', label: 'Clasificación' },
     { id: 'jugadores', label: 'Jugadores' },
+    { id: 'galeria', label: 'Galería' },
     { id: 'analitica', label: 'Analítica' }
   ];
 
@@ -887,6 +955,7 @@ function render() {
   if (ui.tab === 'ronda') html += renderRoundTab();
   else if (ui.tab === 'clasificacion') html += renderStandingsTab();
   else if (ui.tab === 'jugadores') html += renderPlayersTab();
+  else if (ui.tab === 'galeria') html += renderGalleryTab();
   else if (ui.tab === 'analitica') html += renderAnalyticsTab();
 
   html += '<div style="margin-top:32px;border-top:1px solid var(--line);padding-top:16px;display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:10px;">';
@@ -902,6 +971,14 @@ function render() {
   }
   html += '</div>';
   html += '</div>';
+
+  if (ui.lightbox) {
+    html += '<div onclick="closeDeckLightbox()" style="position:fixed;inset:0;background:rgba(10,11,15,.9);display:flex;flex-direction:column;align-items:center;justify-content:center;z-index:1000;padding:24px;cursor:zoom-out;">' +
+      '<img src="' + ui.lightbox.image + '" style="max-width:100%;max-height:78vh;border-radius:10px;box-shadow:0 10px 34px rgba(0,0,0,.5);" />' +
+      '<p style="color:var(--text);margin:14px 0 0;font-size:14px;font-weight:600;">' + esc(ui.lightbox.caption) + '</p>' +
+      '<button class="btn btn-secondary btn-sm" style="margin-top:12px;" onclick="event.stopPropagation();closeDeckLightbox()">Cerrar</button>' +
+    '</div>';
+  }
 
   root.innerHTML = html;
 }
