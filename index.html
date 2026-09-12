@@ -6,6 +6,9 @@
 <title>Copa Energía Asignada — Torneo Pokémon TCG Pocket</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=Rajdhani:wght@600;700&family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+<!-- Firebase (necesario para que todos los celulares vean el mismo torneo en vivo) -->
+<script src="https://www.gstatic.com/firebasejs/10.13.2/firebase-app-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.13.2/firebase-firestore-compat.js"></script>
 <style>
   :root {
     --bg: #12141A;
@@ -58,8 +61,22 @@
 <div id="app"></div>
 
 <script>
+/* =========================================================================
+   CONFIGURACIÓN DE FIREBASE — PEGA AQUÍ TUS DATOS
+   Ve a https://console.firebase.google.com, crea un proyecto gratis,
+   activa "Firestore Database" y registra una app web. Copia el objeto
+   firebaseConfig que te da Firebase y reemplaza el de abajo.
+   ========================================================================= */
+var firebaseConfig = {
+  apiKey: "PEGA_AQUI_TU_API_KEY",
+  authDomain: "PEGA_AQUI.firebaseapp.com",
+  projectId: "PEGA_AQUI",
+  storageBucket: "PEGA_AQUI.appspot.com",
+  messagingSenderId: "PEGA_AQUI",
+  appId: "PEGA_AQUI"
+};
+
 /* ---------- constants ---------- */
-var STORAGE_KEY = 'tcgPocketTournamentV1';
 var ENERGY_TYPES = [
   { name: 'Fuego', color: '#E8683D' },
   { name: 'Agua', color: '#4F9FE0' },
@@ -70,24 +87,104 @@ var ENERGY_TYPES = [
   { name: 'Oscuridad', color: '#8B85A0' },
   { name: 'Metal', color: '#9BA6B0' }
 ];
+var MIN_PLAYERS = 32;
+var MAX_PLAYERS = 128;
+var TOURNAMENT_DOC_ID = 'main'; /* un solo torneo por cada despliegue de esta página */
 
-/* ---------- ephemeral UI state (not persisted) ---------- */
-var ui = { tab: 'ronda', viewRoundIdx: null, confirmReset: false, formError: '' };
+/* ---------- ephemeral UI + synced state ---------- */
+var ui = { tab: 'ronda', viewRoundIdx: null, confirmReset: false, formError: '', loading: true, loadError: false };
+var state = null; /* se llena en vivo desde Firestore */
 
-/* ---------- persistence ---------- */
-function loadState() {
-  try {
-    var raw = localStorage.getItem(STORAGE_KEY);
-    return raw ? JSON.parse(raw) : null;
-  } catch (e) { return null; }
+/* ---------- firebase / firestore refs ---------- */
+var db = null;
+var unsubMeta = null, unsubPlayers = null, unsubRounds = null;
+var deckListenerUnsub = null, deckListenerRoundNumber = null;
+
+function tournamentRef() { return db.collection('tournaments').doc(TOURNAMENT_DOC_ID); }
+function playersRef() { return tournamentRef().collection('players'); }
+function roundsRef() { return tournamentRef().collection('rounds'); }
+function decksRef() { return tournamentRef().collection('decks'); }
+
+function handleWriteError(err) {
+  console.error(err);
+  ui.formError = 'save';
+  render();
 }
-function saveState(state) {
+
+function initFirebase() {
   try {
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
-    return true;
-  } catch (e) { return false; }
+    firebase.initializeApp(firebaseConfig);
+    db = firebase.firestore();
+  } catch (e) {
+    ui.loading = false; ui.loadError = true; render();
+    return;
+  }
+  unsubMeta = tournamentRef().onSnapshot(function (doc) {
+    if (!doc.exists) {
+      if (unsubPlayers) { unsubPlayers(); unsubPlayers = null; }
+      if (unsubRounds) { unsubRounds(); unsubRounds = null; }
+      if (deckListenerUnsub) { deckListenerUnsub(); deckListenerUnsub = null; deckListenerRoundNumber = null; }
+      state = null;
+      ui.loading = false;
+      render();
+      return;
+    }
+    var d = doc.data();
+    if (!state) state = { players: [], rounds: [] };
+    state.name = d.name; state.pin = d.pin; state.createdAt = d.createdAt;
+    if (!unsubPlayers) startTournamentListeners();
+    ui.loading = false;
+    render();
+  }, function (err) {
+    console.error(err);
+    ui.loading = false; ui.loadError = true; render();
+  });
 }
-var state = loadState();
+
+function startTournamentListeners() {
+  unsubPlayers = playersRef().orderBy('joinedAt', 'asc').onSnapshot(function (snap) {
+    var players = [];
+    snap.forEach(function (doc) {
+      var d = doc.data();
+      players.push({ id: doc.id, name: d.name, photo: d.photo || null });
+    });
+    if (!state) state = { players: [], rounds: [] };
+    state.players = players;
+    render();
+  }, function (err) { console.error(err); });
+
+  unsubRounds = roundsRef().orderBy('number', 'asc').onSnapshot(function (snap) {
+    var rounds = [];
+    snap.forEach(function (doc) {
+      var d = doc.data();
+      var existing = (state && state.rounds || []).find(function (r) { return r.number === d.number; });
+      rounds.push({
+        number: d.number,
+        energyType: d.energyType,
+        matches: d.matches || [],
+        deckFlags: d.deckFlags || {},
+        decks: (existing && existing.decks) || {}
+      });
+    });
+    if (!state) state = { players: [], rounds: [] };
+    state.rounds = rounds;
+    render();
+  }, function (err) { console.error(err); });
+}
+
+/* Solo se pide la imagen de la ronda que se está viendo — evita bajar todas
+   las fotos de mazo de las 8 rondas de golpe. */
+function ensureDeckListener(roundNumber) {
+  if (deckListenerRoundNumber === roundNumber) return;
+  if (deckListenerUnsub) deckListenerUnsub();
+  deckListenerRoundNumber = roundNumber;
+  deckListenerUnsub = decksRef().where('roundNumber', '==', roundNumber).onSnapshot(function (snap) {
+    var map = {};
+    snap.forEach(function (doc) { var d = doc.data(); map[d.playerId] = { image: d.image || null }; });
+    var r = state && state.rounds.find(function (rr) { return rr.number === roundNumber; });
+    if (r) { r.decks = map; render(); }
+  }, function (err) { console.error(err); });
+}
 
 /* ---------- helpers ---------- */
 function uid() { return Math.random().toString(36).slice(2, 9) + Date.now().toString(36).slice(-4); }
@@ -105,11 +202,18 @@ function avatarHtml(st, id, size) {
 }
 
 /* ---------- organizer lock ---------- */
-/* Los jugadores solo pueden registrar SU mazo de la ronda actual. Cualquier otra
-   acción (reportar resultados, generar rondas, corregir, reiniciar, editar un mazo
-   ya guardado) pide el PIN del organizador. El desbloqueo dura mientras la pestaña
-   del navegador siga abierta (sessionStorage) — al cerrarla, vuelve a bloquearse. */
-function lockFlagKey() { return 'organizerUnlocked_' + STORAGE_KEY; }
+/* Los jugadores solo pueden registrarse (nick + foto) y subir SU mazo de la
+   ronda actual. Cualquier otra acción (reportar resultados, generar rondas,
+   corregir, reiniciar, editar un mazo ya guardado, quitar a un jugador) pide
+   el PIN del organizador. El desbloqueo dura mientras la pestaña del
+   navegador siga abierta en ESE dispositivo (sessionStorage) — cada
+   dispositivo que administre el torneo debe desbloquearlo por su cuenta.
+   Nota: como los datos viven en Firestore con reglas abiertas para que
+   funcione sin backend propio, el PIN es un candado de uso (evita que un
+   jugador cualquiera toque cosas por accidente), no una seguridad a prueba
+   de todo — cualquiera con las reglas del proyecto podría leer/escribir
+   directamente. */
+function lockFlagKey() { return 'organizerUnlocked_tcgPocketTournament'; }
 function isUnlocked() { try { return sessionStorage.getItem(lockFlagKey()) === '1'; } catch (e) { return false; } }
 function lockOrganizer() { try { sessionStorage.removeItem(lockFlagKey()); } catch (e) {} render(); }
 function requireUnlock(action) {
@@ -173,50 +277,24 @@ function generatePairings(st) {
   return { pairs: pairs, byeId: byeId };
 }
 
-/* ---------- state mutators ---------- */
-function updateState(mutator) {
-  state = mutator(state);
-  var ok = saveState(state);
-  if (!ok) { ui.formError = 'save'; }
-  render();
-}
-function updateMatch(matchId, updater) {
-  updateState(function (st) {
-    return Object.assign({}, st, {
-      rounds: st.rounds.map(function (r) {
-        return Object.assign({}, r, { matches: r.matches.map(function (m) { return m.id === matchId ? updater(m) : m; }) });
-      })
-    });
-  });
-}
-function updateRoundDeck(roundNumber, playerId, deck) {
-  updateState(function (st) {
-    return Object.assign({}, st, {
-      rounds: st.rounds.map(function (r) {
-        if (r.number !== roundNumber) return r;
-        var decks = Object.assign({}, r.decks || {});
-        if (deck === null) { delete decks[playerId]; } else { decks[playerId] = deck; }
-        return Object.assign({}, r, { decks: decks });
-      })
-    });
-  });
-}
 function makeMatches(pairs, byeId) {
   var matches = pairs.map(function (pr) { return { id: uid(), p1: pr[0], p2: pr[1], p1g: 0, p2g: 0, status: 'pending', winner: null, bye: false }; });
   if (byeId) matches.push({ id: uid(), p1: byeId, p2: null, p1g: 2, p2g: 0, status: 'done', winner: byeId, bye: true });
   return matches;
 }
 
-var MIN_PLAYERS = 32;
-var MAX_PLAYERS = 128;
-
+/* ---------- tournament creation ---------- */
 function createTournament() {
   var name = document.getElementById('tournamentName').value.trim();
   var pin = document.getElementById('organizerPin').value.trim();
   var errEl = document.getElementById('setupError');
+  errEl.textContent = '';
   if (!name) { errEl.textContent = 'Ponle un nombre al torneo.'; return; }
   if (!pin || pin.length < 4) { errEl.textContent = 'Define un PIN de organizador de al menos 4 caracteres — lo pedirá la app para reportar resultados, generar rondas o corregir cosas.'; return; }
-  updateState(function () { return { name: name, pin: pin, players: [], rounds: [], createdAt: Date.now() }; });
+  tournamentRef().set({ name: name, pin: pin, createdAt: Date.now() }).catch(function (err) {
+    console.error(err);
+    errEl.textContent = 'No se pudo crear el torneo. Revisa tu conexión y que hayas pegado bien la configuración de Firebase al inicio del archivo.';
+  });
 }
 
 /* ---------- self-registration (jugadores se unen con nick + foto) ---------- */
@@ -236,23 +314,27 @@ function addPlayerSelf() {
   if (file.type !== 'image/png' && file.type !== 'image/jpeg') { if (errEl) errEl.textContent = 'La imagen debe ser JPG o PNG.'; return; }
   if (btn) { btn.disabled = true; btn.textContent = 'Uniéndote…'; }
   compressImageFile(file, 480, 0.6).then(function (photo) {
-    updateState(function (st) {
-      return Object.assign({}, st, { players: st.players.concat([{ id: uid(), name: name, photo: photo }]) });
-    });
-  }).catch(function () {
-    if (errEl) errEl.textContent = 'No se pudo procesar la imagen, intenta de nuevo.';
+    return playersRef().add({ name: name, photo: photo, joinedAt: Date.now() });
+  }).then(function () {
+    if (btn) { btn.disabled = false; btn.textContent = 'Unirme al torneo'; }
+    if (nameInput) nameInput.value = '';
+    if (fileInput) fileInput.value = '';
+    var preview = document.getElementById('joinPhoto-preview');
+    if (preview) preview.innerHTML = '';
+  }).catch(function (err) {
+    console.error(err);
+    if (errEl) errEl.textContent = 'No se pudo unir al torneo, revisa tu conexión e intenta de nuevo.';
     if (btn) { btn.disabled = false; btn.textContent = 'Unirme al torneo'; }
   });
 }
 
 function removePlayer(playerId) {
   requireUnlock(function () {
-    updateState(function (st) {
-      return Object.assign({}, st, { players: st.players.filter(function (p) { return p.id !== playerId; }) });
-    });
+    playersRef().doc(playerId).delete().catch(handleWriteError);
   });
 }
 
+/* ---------- rounds ---------- */
 function generateRound() {
   requireUnlock(function () {
     if (state.rounds.length === 0 && state.players.length < MIN_PLAYERS) {
@@ -263,9 +345,22 @@ function generateRound() {
     var pr = generatePairings(state);
     var energyType = ENERGY_TYPES[(num - 1) % ENERGY_TYPES.length].name;
     var matches = makeMatches(pr.pairs, pr.byeId);
-    updateState(function (st) { return Object.assign({}, st, { rounds: st.rounds.concat([{ number: num, energyType: energyType, matches: matches, decks: {} }]) }); });
+    roundsRef().doc(String(num)).set({ number: num, energyType: energyType, matches: matches, deckFlags: {} }).catch(handleWriteError);
     ui.viewRoundIdx = null;
   });
+}
+
+function findRoundByMatch(matchId) {
+  return state.rounds.find(function (r) { return r.matches.some(function (m) { return m.id === matchId; }); });
+}
+function writeRoundMatches(roundNumber, matches) {
+  roundsRef().doc(String(roundNumber)).update({ matches: matches }).catch(handleWriteError);
+}
+function updateMatch(matchId, updater) {
+  var round = findRoundByMatch(matchId);
+  if (!round) return;
+  var newMatches = round.matches.map(function (m) { return m.id === matchId ? updater(m) : m; });
+  writeRoundMatches(round.number, newMatches);
 }
 
 function incrementGame(matchId, side) {
@@ -345,17 +440,28 @@ function submitRoundDeck(roundNumber, playerId) {
   if (file.type !== 'image/png' && file.type !== 'image/jpeg') { if (errEl) errEl.textContent = 'La imagen debe ser JPG o PNG.'; return; }
   if (errEl) errEl.textContent = '';
   function save(imageData) {
-    updateRoundDeck(roundNumber, playerId, { image: imageData || null });
+    var docId = roundNumber + '_' + playerId;
+    return decksRef().doc(docId).set({ roundNumber: roundNumber, playerId: playerId, image: imageData || null }).then(function () {
+      var patch = {}; patch['deckFlags.' + playerId] = true;
+      return roundsRef().doc(String(roundNumber)).update(patch);
+    });
   }
   if (btn) { btn.disabled = true; btn.textContent = 'Guardando…'; }
-  compressImageFile(file, 720, 0.62).then(save).catch(function () {
+  compressImageFile(file, 720, 0.62).then(save).catch(function (err) {
+    console.error(err);
     if (btn) { btn.disabled = false; btn.textContent = 'Guardar mazo'; }
-    if (errEl) errEl.textContent = 'No se pudo procesar la imagen, intenta de nuevo.';
+    if (errEl) errEl.textContent = 'No se pudo guardar, revisa tu conexión e intenta de nuevo.';
   });
 }
 
 function editRoundDeck(roundNumber, playerId) {
-  requireUnlock(function () { updateRoundDeck(roundNumber, playerId, null); });
+  requireUnlock(function () {
+    var docId = roundNumber + '_' + playerId;
+    decksRef().doc(docId).delete().then(function () {
+      var patch = {}; patch['deckFlags.' + playerId] = firebase.firestore.FieldValue.delete();
+      return roundsRef().doc(String(roundNumber)).update(patch);
+    }).catch(handleWriteError);
+  });
 }
 
 function setTab(t) { ui.tab = t; ui.viewRoundIdx = null; render(); }
@@ -364,14 +470,52 @@ function nextRound() { var idx = ui.viewRoundIdx === null ? state.rounds.length 
 
 function showConfirmReset() { requireUnlock(function () { ui.confirmReset = true; render(); }); }
 function cancelReset() { ui.confirmReset = false; render(); }
+
+function deleteCollectionInChunks(ref) {
+  return ref.get().then(function (snap) {
+    var docs = snap.docs;
+    var chunks = [];
+    for (var i = 0; i < docs.length; i += 400) chunks.push(docs.slice(i, i + 400));
+    return chunks.reduce(function (p, chunk) {
+      return p.then(function () {
+        var batch = db.batch();
+        chunk.forEach(function (d) { batch.delete(d.ref); });
+        return batch.commit();
+      });
+    }, Promise.resolve());
+  });
+}
+
 function confirmResetYes() {
   requireUnlock(function () {
-    localStorage.removeItem(STORAGE_KEY);
-    try { sessionStorage.removeItem(lockFlagKey()); } catch (e) {}
-    state = null;
-    ui = { tab: 'ronda', viewRoundIdx: null, confirmReset: false, formError: '' };
-    render();
+    Promise.all([
+      deleteCollectionInChunks(playersRef()),
+      deleteCollectionInChunks(roundsRef()),
+      deleteCollectionInChunks(decksRef())
+    ]).then(function () {
+      return tournamentRef().delete();
+    }).then(function () {
+      try { sessionStorage.removeItem(lockFlagKey()); } catch (e) {}
+      ui = { tab: 'ronda', viewRoundIdx: null, confirmReset: false, formError: '', loading: false, loadError: false };
+      /* el listener de meta detecta que el doc ya no existe y limpia "state" solo */
+    }).catch(function (err) {
+      console.error(err);
+      alert('No se pudo reiniciar por completo, revisa tu conexión e intenta de nuevo.');
+    });
   });
+}
+
+/* ---------- render: loading / error screens ---------- */
+function renderLoading() {
+  return '<div style="max-width:640px;margin:0 auto;padding:60px 20px;text-align:center;">' +
+    '<p style="color:var(--muted);font-size:14px;">Conectando con el torneo…</p></div>';
+}
+function renderLoadError() {
+  return '<div style="max-width:640px;margin:0 auto;padding:60px 20px;">' +
+    '<div class="card">' +
+      '<p class="display" style="font-size:20px;margin:0 0 8px;">No se pudo conectar</p>' +
+      '<p style="color:var(--muted);font-size:13.5px;margin:0;">Revisa tu conexión a internet y que la configuración de Firebase (al inicio del archivo, dentro de <code>firebaseConfig</code>) tenga tus datos reales y no los de ejemplo.</p>' +
+    '</div></div>';
 }
 
 /* ---------- render: setup screen ---------- */
@@ -386,7 +530,7 @@ function renderSetup() {
         '<label style="display:block;font-size:12.5px;color:var(--muted);margin-bottom:6px;">PIN de organizador (mínimo 4 caracteres)</label>' +
         '<input type="text" id="organizerPin" placeholder="Ej. 4127" style="margin-bottom:6px;" />' +
         '<p style="color:var(--muted);font-size:11.5px;margin:0 0 18px;">La app lo pedirá para reportar resultados, generar rondas, corregir mazos ya guardados o reiniciar el torneo.</p>' +
-        '<p style="color:var(--muted);font-size:11.5px;margin:0;">No hace falta capturar la lista de jugadores aquí: en cuanto crees el torneo, cada quien se une desde la pestaña "Jugadores" poniendo su nick y subiendo una foto (mínimo ' + MIN_PLAYERS + ', máximo ' + MAX_PLAYERS + ').</p>' +
+        '<p style="color:var(--muted);font-size:11.5px;margin:0;">No hace falta capturar la lista de jugadores aquí: en cuanto crees el torneo, cada quien se une desde su propio celular en la pestaña "Jugadores" poniendo su nick y subiendo una foto (mínimo ' + MIN_PLAYERS + ', máximo ' + MAX_PLAYERS + ').</p>' +
         '<p id="setupError" style="color:var(--danger);font-size:12.5px;margin:10px 0 0;"></p>' +
         '<div style="margin-top:16px;"><button class="btn btn-primary" onclick="createTournament()">Iniciar torneo</button></div>' +
       '</div>' +
@@ -396,16 +540,17 @@ function renderSetup() {
 
 /* ---------- render: deck slot (per player, per round) ---------- */
 function renderRoundDeckSlot(round, playerId, name) {
+  var hasDeck = !!(round.deckFlags && round.deckFlags[playerId]);
   var deck = (round.decks || {})[playerId];
   var idBase = 'rdeck-' + round.number + '-' + playerId;
-  if (deck) {
+  if (hasDeck) {
     return (
       '<div style="padding:10px 12px;background:var(--panel-alt);border-radius:8px;border:1px solid var(--line);">' +
         '<div style="display:flex;justify-content:space-between;align-items:flex-start;gap:8px;">' +
           '<p style="margin:0;font-size:12.5px;color:var(--accent);font-weight:600;">' + esc(name) + '</p>' +
           '<button class="btn btn-secondary btn-sm" onclick="editRoundDeck(' + round.number + ',\'' + playerId + '\')">Editar</button>' +
         '</div>' +
-        (deck.image ? '<img src="' + deck.image + '" style="max-width:100%;max-height:170px;border-radius:6px;margin-top:8px;display:block;" />' : '') +
+        (deck && deck.image ? '<img src="' + deck.image + '" style="max-width:100%;max-height:170px;border-radius:6px;margin-top:8px;display:block;" />' : '<p style="margin:8px 0 0;font-size:11.5px;color:var(--muted);">Cargando la foto…</p>') +
       '</div>'
     );
   }
@@ -438,7 +583,8 @@ function renderMatchCard(st, round, m) {
     return html;
   }
   var p1n = esc(playerName(st, m.p1)), p2n = esc(playerName(st, m.p2));
-  var deck1 = (round.decks || {})[m.p1], deck2 = (round.decks || {})[m.p2];
+  var hasDeck1 = !!(round.deckFlags && round.deckFlags[m.p1]);
+  var hasDeck2 = !!(round.deckFlags && round.deckFlags[m.p2]);
   var done = m.status === 'done';
   var winnerName = done ? playerName(st, m.winner) : null;
   var c1 = winnerName === playerName(st, m.p1) ? 'var(--success)' : 'var(--text)';
@@ -458,7 +604,7 @@ function renderMatchCard(st, round, m) {
           '</div>';
   html += '</div>';
 
-  var bothDecksIn = !!deck1 && !!deck2;
+  var bothDecksIn = hasDeck1 && hasDeck2;
 
   if (!done) {
     if (!bothDecksIn) {
@@ -498,7 +644,7 @@ function renderRoundTab() {
     if (joined < MIN_PLAYERS) {
       return '<div class="card" style="text-align:center;padding:32px;">' +
         '<p class="display" style="font-size:20px;margin:0 0 8px;">Esperando jugadores</p>' +
-        '<p style="color:var(--muted);font-size:13.5px;margin:0 0 18px;">Llevas ' + joined + ' de ' + MIN_PLAYERS + ' jugadores mínimos. Cada quien se registra con su nick y una foto en la pestaña "Jugadores".</p>' +
+        '<p style="color:var(--muted);font-size:13.5px;margin:0 0 18px;">Llevas ' + joined + ' de ' + MIN_PLAYERS + ' jugadores mínimos. Cada quien se registra con su nick y una foto en la pestaña "Jugadores", desde su propio celular.</p>' +
         '<button class="btn btn-secondary" onclick="setTab(\'jugadores\')">Ir a Jugadores</button>' +
       '</div>';
     }
@@ -511,6 +657,7 @@ function renderRoundTab() {
   var currentIdx = state.rounds.length - 1;
   var idx = ui.viewRoundIdx === null ? currentIdx : ui.viewRoundIdx;
   var round = state.rounds[idx];
+  ensureDeckListener(round.number);
   var isCurrent = idx === currentIdx;
   var currentComplete = state.rounds[currentIdx].matches.every(function (m) { return m.status === 'done'; });
   var canGenerateNext = state.rounds.length < 8 && currentComplete;
@@ -569,14 +716,14 @@ function renderStandingsTab() {
   return html;
 }
 
-/* ---------- render: players tab (solo lectura) ---------- */
+/* ---------- render: players tab ---------- */
 function renderJoinForm() {
   var unlocked = isUnlocked();
   var count = state.players.length;
   var full = count >= MAX_PLAYERS;
   var html = '<div class="card" style="margin-bottom:16px;">' +
     '<h2 style="font-size:20px;margin:0 0 4px;">Únete al torneo</h2>' +
-    '<p style="color:var(--muted);font-size:13.5px;margin:0 0 16px;">Escribe tu nick y sube una foto tuya (o de tu carta favorita) para identificarte durante el torneo. No se pide PIN para registrarte.</p>' +
+    '<p style="color:var(--muted);font-size:13.5px;margin:0 0 16px;">Escribe tu nick y sube una foto tuya (o de tu carta favorita) para identificarte durante el torneo. No se pide PIN para registrarte, y aparece al instante en todos los celulares.</p>' +
     (full
       ? '<p style="color:var(--danger);font-size:13px;margin:0;">Cupo lleno — se alcanzó el máximo de ' + MAX_PLAYERS + ' jugadores.</p>'
       : (
@@ -618,7 +765,7 @@ function renderPlayersTab() {
     '<p style="color:var(--muted);font-size:13.5px;margin:0 0 16px;">' + state.players.length + ' jugadores inscritos. El mazo de cada uno se registra ronda por ronda en la pestaña "Ronda actual".</p>' +
     '<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:8px;">';
   state.players.forEach(function (p) {
-    var roundsPlayed = state.rounds.filter(function (r) { return r.decks && r.decks[p.id]; }).length;
+    var roundsPlayed = state.rounds.filter(function (r) { return r.deckFlags && r.deckFlags[p.id]; }).length;
     html += '<div style="display:flex;align-items:center;gap:10px;padding:8px 12px;background:var(--panel-alt);border:1px solid var(--line);border-radius:6px;font-size:13px;">' +
       avatarHtml(state, p.id, 32) +
       '<div style="overflow:hidden;">' +
@@ -632,24 +779,10 @@ function renderPlayersTab() {
 }
 
 /* ---------- render: analytics tab ---------- */
-function bars(data, color, maxLabelWidth) {
-  var max = Math.max.apply(null, data.map(function (d) { return d.count; }).concat([1]));
-  var html = '';
-  data.forEach(function (d) {
-    var pct = Math.round((d.count / max) * 100);
-    html += '<div class="bar-row">' +
-      '<span style="font-size:12.5px;color:var(--text);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">' + esc(d.name) + '</span>' +
-      '<div class="bar-track"><div class="bar-fill" style="width:' + pct + '%;background:' + color + ';"></div></div>' +
-      '<span style="font-size:12.5px;color:var(--muted);text-align:right;">' + d.count + '</span>' +
-    '</div>';
-  });
-  return html;
-}
-
 function computeDeckUsage(st) {
   var totalDecks = 0;
   st.rounds.forEach(function (r) {
-    totalDecks += Object.keys(r.decks || {}).length;
+    totalDecks += Object.keys(r.deckFlags || {}).length;
   });
   return { totalDecks: totalDecks };
 }
@@ -658,8 +791,7 @@ function buildRawRows(st) {
   var rows = [];
   st.rounds.forEach(function (r) {
     st.players.forEach(function (p) {
-      var d = (r.decks || {})[p.id];
-      if (!d) return;
+      if (!r.deckFlags || !r.deckFlags[p.id]) return;
       var result = '—';
       r.matches.forEach(function (m) {
         if (m.bye && m.p1 === p.id) { result = 'BYE'; return; }
@@ -710,6 +842,8 @@ function renderAnalyticsTab() {
 /* ---------- master render ---------- */
 function render() {
   var root = document.getElementById('app');
+  if (ui.loading) { root.innerHTML = renderLoading(); return; }
+  if (ui.loadError) { root.innerHTML = renderLoadError(); return; }
   if (!state) { root.innerHTML = renderSetup(); return; }
 
   var currentIdx = state.rounds.length - 1;
@@ -747,7 +881,7 @@ function render() {
 
   html += '<div style="padding:24px;max-width:900px;margin:0 auto;width:100%;">';
   if (ui.formError === 'save') {
-    html += '<div style="margin-bottom:16px;padding:10px 14px;background:var(--danger-dark);border:1px solid var(--danger);border-radius:8px;color:#FBD7D5;font-size:13px;">No se pudo guardar el último cambio en este navegador. Revisa el espacio de almacenamiento disponible (las fotos de mazo ocupan espacio; si se llena, borra fotos de rondas viejas).</div>';
+    html += '<div style="margin-bottom:16px;padding:10px 14px;background:var(--danger-dark);border:1px solid var(--danger);border-radius:8px;color:#FBD7D5;font-size:13px;">No se pudo guardar el último cambio. Revisa tu conexión a internet e inténtalo de nuevo.</div>';
   }
 
   if (ui.tab === 'ronda') html += renderRoundTab();
@@ -756,7 +890,7 @@ function render() {
   else if (ui.tab === 'analitica') html += renderAnalyticsTab();
 
   html += '<div style="margin-top:32px;border-top:1px solid var(--line);padding-top:16px;display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:10px;">';
-  html += '<span style="font-size:12px;color:var(--muted);">Los datos se guardan en este navegador (almacenamiento local), incluidas las fotos de mazo.</span>';
+  html += '<span style="font-size:12px;color:var(--muted);">Los datos se sincronizan en la nube (Firebase) — cualquier celular con este link ve lo mismo en vivo.</span>';
   if (!ui.confirmReset) {
     html += '<button class="btn btn-danger btn-sm" onclick="showConfirmReset()">Reiniciar torneo</button>';
   } else {
@@ -773,6 +907,7 @@ function render() {
 }
 
 render();
+initFirebase();
 </script>
 </body>
 </html>
